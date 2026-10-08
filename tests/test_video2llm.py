@@ -6,6 +6,7 @@ tests that need them are skipped without them.
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -313,20 +314,23 @@ def test_stale_cleanup_drops_the_lane_sheets_too(clip):
 
 
 def test_agent_files_carry_one_instruction():
-    """agents/: every app's file is the same instruction — the plain ones word for word, the Cursor rule and the
-    Claude skill after their front matter (the skill names the script's place inside the skill folder)."""
+    """agents/: ONE instruction — AGENTS.md (Codex / Antigravity / Cursor; Claude Code imports it, Gemini CLI and Qwen
+    Code get it under their own file name), the Cursor rule and the Claude skill carry the same text after their front
+    matter (the skill names the script's place inside the skill folder). No per-app copies that differ only by name."""
     agents = ROOT / "agents"
 
     def body(path: Path) -> str:
         text = path.read_text(encoding="utf-8")
         if text.startswith("---\n"):
             text = text.split("---\n", 2)[2]
-        text = "\n".join(line for line in text.splitlines() if not line.startswith("<!--"))
+        text = re.sub(r"<!--.*?-->", "", text, flags=re.S)  # the header comment (one line or several)
         text = text.replace("~/.claude/skills/video2llm/video2llm.py", "/path/to/video2llm.py")
         text = text.replace("   (the copy of video2llm.py in this skill's folder)", "")
         return text.strip()
 
-    plain = [agents / n for n in ("CLAUDE.md", "AGENTS.md", "GEMINI.md", "QWEN.md")]
+    plain = [agents / "AGENTS.md"]
+    for dup in ("CLAUDE.md", "GEMINI.md", "QWEN.md"):
+        assert not (agents / dup).exists(), f"{dup}: one AGENTS.md, saved under the app's name by the user"
     others = [agents / ".cursor" / "rules" / "video2llm.mdc", agents / "SKILL.md"]
     ref = body(plain[0])
     for path in plain + others:
@@ -342,5 +346,8 @@ def test_agent_files_carry_one_instruction():
     cursor = (agents / ".cursor" / "rules" / "video2llm.mdc").read_text(encoding="utf-8")
     assert cursor.startswith("---\n") and "alwaysApply: true" in cursor.split("---\n", 2)[1]
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
-    for name in ("agents/", "CLAUDE.md", "AGENTS.md", "GEMINI.md", "QWEN.md", "SKILL.md", "video2llm.mdc"):
+    for name in ("agents/AGENTS.md", "@agents/AGENTS.md", "GEMINI.md", "QWEN.md", "SKILL.md", "video2llm.mdc", "agents/README.md"):
         assert name in readme, name
+    guide = (agents / "README.md").read_text(encoding="utf-8")
+    for app in ("Claude Code", "Codex CLI", "Antigravity", "Gemini CLI", "Qwen Code", "Cursor", "Cowork"):
+        assert app in guide, app

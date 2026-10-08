@@ -1,4 +1,7 @@
-<!-- video2llm: replace /path/to/video2llm.py with where you put the script, then keep this section in your AGENTS.md -->
+<!-- video2llm — the one instruction for every agent. Replace /path/to/video2llm.py with where you put the script and keep
+     this section in the file your agent reads: AGENTS.md (Codex CLI, Antigravity, Cursor), CLAUDE.md (Claude Code — or just the
+     line `@agents/AGENTS.md` there), GEMINI.md (Gemini CLI), QWEN.md (Qwen Code). Same text as a skill: SKILL.md; as a Cursor
+     rule: .cursor/rules/video2llm.mdc. -->
 
 # Watching a video — video2llm
 

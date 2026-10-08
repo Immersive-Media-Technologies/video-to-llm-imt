@@ -241,23 +241,24 @@ Pillow the lane falls back to one image per frame.
 ### 2. Your app
 
 An agent does not know the script exists until you tell it. The [`agents/`](agents/) folder holds one
-instruction in each app's own format — run the script instead of opening the video, read `lane.md`, open
-every sheet, ask with the cost before `--frames all` / `--sounds`, never ffmpeg, allow the first run its time.
-Copy the file for your app and replace `/path/to/video2llm.py` with where you put the script. Chats need
-nothing installed — only the right format to attach.
+instruction, [`agents/AGENTS.md`](agents/AGENTS.md) — run the script instead of opening the video, read
+`lane.md`, open every sheet, ask with the cost before `--frames all` / `--sounds`, never ffmpeg, allow the
+first run its time — plus the same text as a Claude skill and as a Cursor rule. Put it where your app reads it
+(the table; [`agents/README.md`](agents/README.md) says the same per file) and replace `/path/to/video2llm.py`
+with where you put the script. Chats need nothing installed — only the right format to attach.
 
 | App | Do this |
 |---|---|
-| **Claude Code** (CLI, desktop, IDE) | append `agents/CLAUDE.md` to the project's `CLAUDE.md`, or to `~/.claude/CLAUDE.md` for every project |
+| **Claude Code** (CLI, desktop, IDE) | the line `@agents/AGENTS.md` in the project's `CLAUDE.md` — or append the text of `agents/AGENTS.md` to `CLAUDE.md` / `~/.claude/CLAUDE.md` for every project |
 | **Claude Code**, as a skill | put `agents/SKILL.md` and `video2llm.py` into `~/.claude/skills/video2llm/` — found whenever a video comes up, no path to edit |
 | **Claude Cowork** | the same two files in a folder `video2llm`, zipped, at *Customize → Skills* in the Claude app — or say the line below in the chat; keep the video inside the folder you connected |
 | **Claude** app / claude.ai (chat) | nothing to install: `python3 video2llm.py clip.mp4 --format pdf`, attach `lane.pdf` |
 | **Deep Artisan** | nothing to install: attach the video — the app runs this script itself, puts the sheets into the model's message (`lane.json`) and executes the model's `video` requests (`--agent-tool`); the chip's toggle turns 1 a second into 2–4 (`--fps`); on the Anthropic subscription channel six frames to a sheet (`--sheet-frames 6`) |
-| **Cursor** | `agents/.cursor/rules/video2llm.mdc` into the project's `.cursor/rules/` |
+| **Cursor** | `agents/.cursor/rules/video2llm.mdc` into the project's `.cursor/rules/` (Cursor reads `AGENTS.md` in the project root too) |
 | **Codex CLI** | `agents/AGENTS.md` into the project root, or `~/.codex/AGENTS.md` |
 | **Antigravity** | `agents/AGENTS.md` into the project root, or `~/.gemini/AGENTS.md` |
-| **Gemini CLI** | `agents/GEMINI.md` into the project root, or `~/.gemini/GEMINI.md` |
-| **Qwen Code** | `agents/QWEN.md` into the project root, or `~/.qwen/QWEN.md` |
+| **Gemini CLI** | the same `agents/AGENTS.md`, saved as `GEMINI.md` in the project root or `~/.gemini/GEMINI.md` |
+| **Qwen Code** | the same `agents/AGENTS.md`, saved as `QWEN.md` in the project root or `~/.qwen/QWEN.md` |
 | **Gemini** app / web | nothing to install: `--format pdf`, attach `lane.pdf` — or the video itself, up to 5 min |
 | **ChatGPT** (desktop, web) | nothing to install: `--format sheets`, attach the files of one `message-NN` folder per message |
 | **Any chat** with image upload | the same `--format sheets` |
