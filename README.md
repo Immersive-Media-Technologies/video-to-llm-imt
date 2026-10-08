@@ -303,7 +303,7 @@ python3 video2llm.py lecture.mp4 --frames at --times 3:12,7:40       # one 1024p
 ```
 
 ```
-video2llm 0.6.0 — IMG_2056.MOV
+video2llm 0.6.1 — IMG_2056.MOV
   [probe] 100% — 720×1280, 02:29, 30.00 fps, audio
   frames: 1 per second over the whole video, 768px on the long side — frame by frame for a moment: --frames all --start mm:ss --end mm:ss (up to 4.0 s)
   [frames] 100% — 149 frames at 1/s
@@ -464,6 +464,8 @@ Notices for the models and tools it downloads: [THIRD-PARTY-NOTICES.md](THIRD-PA
 
 Every version is on the [Releases](../../releases) page.
 
+- v0.6.1 — a subtitle the site refuses (YouTube 429 on captions) no longer takes the video down: once more
+  without subtitles, then Whisper; exact caption codes only.
 - v0.6.0 — the lecture lane (`--frames none`: no frames, the words and the chapters, the model asks for single
   frames where the screen matters), `--frames at --times` (one 1024px frame per moment), the lecture hint in
   `--download-only --json`.

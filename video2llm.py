@@ -68,7 +68,7 @@ import zipfile
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
-VERSION = "0.6.0"
+VERSION = "0.6.1"
 
 # ── constants (same numbers as the Deep Artisan pipeline) ────────────────────────────────────────
 NATIVE_LIMIT_BYTES = 19 * 1024 * 1024  # Gemini request limit 20 MB minus headroom
@@ -990,13 +990,13 @@ def download_dir() -> Path:
 
 
 def yt_dlp_args(exe: List[str], url: str, dest: Path, ffmpeg: str, id_file: Path, path_file: Path,
-                language: Optional[str] = None, prefer: Optional[List[str]] = None) -> List[str]:
+                language: Optional[str] = None, prefer: Optional[List[str]] = None, subs: bool = True) -> List[str]:
     """One video (no playlist), the best streams up to 1080p merged into an mp4 — the lane never needs
     more; the site's subtitles beside it as .vtt (manual ones in the asked language / ru / en, and the
     automatic track in the original language — `*-orig`) — they stand in for Whisper; the id and the
     final path are written to files (the console is progress only)."""
     langs: List[str] = []
-    for x in ([language] if language and language != "auto" else []) + list(prefer or []) + ["ru", "en"]:
+    for x in ([language] if language and language != "auto" else []) + list(prefer or []) + ["en"]:
         if x and x not in langs:
             langs.append(x)
     # exact codes, not patterns: `ru.*` also matched YouTube's translated tracks (ru-en, …), and a dozen
@@ -1006,8 +1006,8 @@ def yt_dlp_args(exe: List[str], url: str, dest: Path, ffmpeg: str, id_file: Path
                   "-f", "bv*[height<=1080]+ba/b[height<=1080]/bv*+ba/b", "-S", "res:1080,vcodec:h264,ext:mp4:m4a",
                   "--merge-output-format", "mp4", "--ffmpeg-location", str(Path(ffmpeg).resolve().parent),
                   "--write-info-json", "--no-clean-info-json",
-                  "--write-subs", "--write-auto-subs", "--sub-langs", ",".join(langs) + ",.*-orig,-live_chat",
-                  "--sub-format", "vtt/srt/best", "--convert-subs", "vtt",
+                  *(["--write-subs", "--write-auto-subs", "--sub-langs", ",".join(langs) + ",.*-orig,-live_chat",
+                     "--sub-format", "vtt/srt/best", "--convert-subs", "vtt"] if subs else []),
                   "-o", str(dest / "%(title).60B [%(id)s].%(ext)s"),
                   "--print-to-file", "%(id)s", str(id_file),
                   "--print-to-file", "after_move:filepath", str(path_file),
@@ -1038,6 +1038,12 @@ def download_video(url: str, tools: "Tools", progress: Progress, override: Optio
                     progress("download", pct)
         try:
             r = run(yt_dlp_args(exe, url, dest, tools.ffmpeg, id_file, path_file, language, prefer), on_line)
+            # a subtitle the site refuses (YouTube answers 429 on its caption endpoint after a few requests)
+            # must not take the video down: once more without subtitles — the lane then runs Whisper
+            if r.returncode != 0 and "subtitles" in (r.stderr or "") and not path_file.exists():
+                log("  captions: the site refused the subtitles (" + ((r.stderr or "").strip().splitlines() or [""])[-1][:120]
+                    + ") — downloading the video without them; the words come from Whisper")
+                r = run(yt_dlp_args(exe, url, dest, tools.ffmpeg, id_file, path_file, language, prefer, subs=False), on_line)
         except OSError as e:   # a broken shebang, a venv moved elsewhere, no permission
             sys.exit(f"yt-dlp could not be run ({' '.join(exe)}): {e}")
         vid = id_file.read_text(encoding="utf-8").strip().splitlines()[-1] if id_file.exists() and id_file.read_text(encoding="utf-8").strip() else ""
@@ -2013,7 +2019,9 @@ def lecture_blocks(m: Dict[str, Any], label: str, rerun: Optional["Rerun"] = Non
         "Answer from the words AND the frames: what is said, what is shown, what is written on the screen. When something "
         "is not visible in the frames you got, say so or ask for another moment.",
         "When you have answered, offer the user a written guide of this video — a summary or a step-by-step instruction "
-        "with those frames as illustrations at the right places — and make it only if they say yes.",
+        "with those frames as illustrations at the right places — and make it only if they say yes"
+        + (" — with the video_guide tool (it cuts the frames, builds the page and the PDF and files them), not by hand."
+           if rerun and rerun.tool else "."),
     ]
     if p.get("has_audio"):
         rules.append("Sounds other than speech, or every frame of a short moment, are available as for any video: ask the user "

@@ -408,7 +408,8 @@ def test_a_url_is_downloaded_with_yt_dlp_then_treated_as_a_file(clip, tmp_path):
     assert "site's own captions, written by people" in head and "hello from the captions" in head and "second line" in head
     assert "privet iz perevoda" not in head
     args = video2llm.yt_dlp_args(["x"], "u", tmp_path, FFMPEG, tmp_path / "i", tmp_path / "p", None, ["es"])
-    assert args[args.index("--sub-langs") + 1] == "es,ru,en,.*-orig,-live_chat" and "--write-info-json" in args
+    assert args[args.index("--sub-langs") + 1] == "es,en,.*-orig,-live_chat" and "--write-info-json" in args
+    assert "--write-subs" not in video2llm.yt_dlp_args(["x"], "u", tmp_path, FFMPEG, tmp_path / "i", tmp_path / "p", subs=False)
     assert "Title [abc123].mp4" in head.split("run ")[1]   # the rerun command names the downloaded file, not the URL
     assert "--write-subs" in video2llm.yt_dlp_args(["x"], "u", tmp_path, FFMPEG, tmp_path / "i", tmp_path / "p")
     # --download-only: the path on stdout, nothing else written
@@ -522,6 +523,7 @@ def test_lecture_lane_has_the_words_and_no_frames(clip, tmp_path):
     assert "LECTURE MODE" in head and "«Export tutorial»" in head and "NO frames" in head
     assert "Open the Settings panel" in head and "and click Export" in head and "[chapters, from the site]" in head
     assert '"what": "at", "times": ["03:12", "07:40"]' in head and "written by people" in head
+    assert "with the video_guide tool" in head   # the harness's own tool, named only in --agent-tool mode
     assert not (out / "frames_1fps_768px").exists() or not list((out / "frames_1fps_768px").glob("*.jpg"))
     hint = video2llm.lecture_hint(v, {"duration": 6.0}, [{"start": 1, "end": 2.5}, {"start": 3, "end": 4}])
     assert hint["hint"] is True and "category" in " ".join(hint["reasons"])

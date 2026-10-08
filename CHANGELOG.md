@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.6.1] — 2026-10-08
+
+- **A subtitle the site refuses no longer takes the video down.** YouTube answers `429` to too many caption
+  requests (a pattern like `ru.*` used to match every machine-translated track); the download is now asked for
+  exact codes only (the asked languages, `en`, the original `*-orig`) with `--ignore-errors`, and when yt-dlp
+  still fails because of the subtitles, the video is fetched once more without them and Whisper transcribes as
+  before. A yt-dlp that cannot start (a moved venv, a broken shebang) reports as such instead of a traceback.
+- In agent-tool mode the lecture lane names the host's `video_guide` tool for the written guide, so the model
+  does not build the page and the PDF by hand.
+
 ## [0.6.0] — 2026-10-08
 
 - **The lecture lane — `--frames none`.** A lecture, a tutorial, an instruction is a talking person: a stream of
