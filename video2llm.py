@@ -68,7 +68,7 @@ import zipfile
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
-VERSION = "0.2.0"
+VERSION = "0.3.0"
 
 # ── constants (same numbers as the Deep Artisan pipeline) ────────────────────────────────────────
 NATIVE_LIMIT_BYTES = 19 * 1024 * 1024  # Gemini request limit 20 MB minus headroom
@@ -1286,13 +1286,16 @@ class Rerun:
 
 def lane_blocks(m: Dict[str, Any], label: str, start: float, max_frames: Optional[int], dense: bool,
                 end: Optional[float] = None, kind: str = "message", part: Optional[Dict[str, Any]] = None,
-                rerun: Optional["Rerun"] = None, per_sheet: int = 0, fps_overview: int = FRAME_FPS) -> List[Dict[str, Any]]:
+                rerun: Optional["Rerun"] = None, per_sheet: int = 0, fps_overview: int = FRAME_FPS,
+                sheet_tokens: Optional[Dict[str, int]] = None) -> List[Dict[str, Any]]:
     """Header + frames interleaved with the words spoken around each frame; the rest of the
     transcript as text at the end (cheap — the model knows all the speech). `kind` says what the
     header describes: "message" (images in a request or lane.md), "pdf" (pages; part = {index, parts, files})
     or "sheets" (contact sheets; part = {first, last, total, batch, batches}). `per_sheet` > 1: lane.md shows
     the frames that many to an image (agent_sheets) and the header says so. `fps_overview` 2–4: the denser
-    overview (--fps). The header is a short list of rules: the model picks the moments itself, fetches the rest
+    overview (--fps). `sheet_tokens` {"over", "dense"}: Claude tokens of one frame as it sits on its sheet when
+    --sheet-frames scales the frames — the costs in the header follow. The header is a short list of rules:
+    the model picks the moments itself, fetches the rest
     of the overview itself, asks the user only yes or no with the cost before a frame-by-frame or sound request,
     and uses no other tool on the video."""
     p = m["probe"]
@@ -1331,6 +1334,9 @@ def lane_blocks(m: Dict[str, Any], label: str, start: float, max_frames: Optiona
     over = claude_image_tokens(*fit_dims(pw, ph, FRAME_WIDTH)) if pw and ph else 0
     per_dense = (claude_image_tokens(*wh) if use_dense and wh else
                  claude_image_tokens(*fit_dims(pw, ph, DENSE_WIDTH)) if pw and ph else 0)
+    if sheet_tokens:  # --sheet-frames: the frames sit scaled on their sheets — the costs follow
+        over = sheet_tokens.get("over") or over
+        per_dense = sheet_tokens.get("dense") or per_dense
     per_sec = round(per_dense * lim["fps"])
     example = per_dense * (int(round(2 * lim["fps"])) + 1)  # [00:12]–[00:14], both anchors included
     cap = per_dense * (DENSE_MAX_FRAMES + 1)
@@ -1628,9 +1634,34 @@ def pillow_ok() -> bool:
     return importlib.util.find_spec("PIL") is not None
 
 
-def lane_grid(tw: int, th: int) -> List[int]:
+def sheet_fit(tw: int, th: int, cols: int, rows: int) -> float:
+    """The scale (≤ 1) of the frames on a cols × rows sheet that keeps the sheet within Claude's limits
+    (1568 px on the long side, 1568 tokens); 1 = every frame at its own size. The tag strips are not scaled."""
+    s = 1.0
+    for _ in range(60):
+        w = cols * tw * s + (cols - 1) * LANE_GAP_PX
+        h = rows * (LANE_CAP_PX + th * s) + (rows - 1) * LANE_GAP_PX
+        if max(w, h) <= 1568 and math.ceil(w / 28) * math.ceil(h / 28) <= 1568:
+            return s
+        s *= 0.98
+    return s
+
+
+def lane_grid(tw: int, th: int, want: int = 0) -> List[int]:
     """The most frames per image that keep every frame at its own size and the sheet within Claude's limits,
-    at no more than ~6 % extra tokens over the frames sent one by one; [1, 1] = no sheets."""
+    at no more than ~6 % extra tokens over the frames sent one by one; [1, 1] = no sheets. `want` > 1
+    (--sheet-frames): exactly that many frames to a sheet, in the grid that scales them the least — for a chat
+    that counts the files of a message."""
+    if want > 1:
+        best, best_s = [want, 1], 0.0
+        for cols in range(1, want + 1):
+            if want % cols:
+                continue
+            rows = want // cols
+            s = sheet_fit(tw, th, cols, rows)
+            if s > best_s + 1e-9:
+                best, best_s = [cols, rows], s
+        return best
     single = claude_image_tokens(tw, th)
     best, best_n, best_tok = [1, 1], 1, single
     for cols in range(1, 9):
@@ -1648,13 +1679,24 @@ def lane_grid(tw: int, th: int) -> List[int]:
     return best
 
 
-def lane_sheet_plan(m: Dict[str, Any], dense: bool, enabled: bool = True) -> List[int]:
+def lane_sheet_plan(m: Dict[str, Any], dense: bool, enabled: bool = True, want: int = 0) -> List[int]:
     """The grid lane.md will use for this lane's frames — [1, 1] when sheets are off or Pillow is missing."""
     frames = ((m.get("dense") or {}).get("frames") if dense else m.get("frames")) or []
     if not (enabled and frames and pillow_ok()):
         return [1, 1]
     wh = jpeg_size(frames[0]["file"])
-    return lane_grid(*wh) if wh else [1, 1]
+    return lane_grid(*wh, want=want) if wh else [1, 1]
+
+
+def sheet_frame_tokens(wh: Optional[List[int]], grid: List[int]) -> int:
+    """Claude tokens of one frame as it sits on a sheet of this grid (scaled when the grid asks for it)."""
+    if not wh:
+        return 0
+    cols, rows = grid
+    s = sheet_fit(wh[0], wh[1], cols, rows)
+    w = cols * wh[0] * s + (cols - 1) * LANE_GAP_PX
+    h = rows * (LANE_CAP_PX + wh[1] * s) + (rows - 1) * LANE_GAP_PX
+    return max(1, round(claude_image_tokens(w, h) / (cols * rows)))
 
 
 def _render_lane_sheet(cells: List[Dict[str, Any]], cols: int, path: Path, font: Any) -> None:
@@ -1663,6 +1705,9 @@ def _render_lane_sheet(cells: List[Dict[str, Any]], cols: int, path: Path, font:
         tw, th = im.size
     used = min(cols, len(cells))
     rows = math.ceil(len(cells) / cols)
+    s = sheet_fit(tw, th, cols, rows)  # a sheet with more frames than fit at their own size → the frames are scaled
+    if s < 1:
+        tw, th = max(1, round(tw * s)), max(1, round(th * s))
     img = Image.new("RGB", (used * tw + (used - 1) * LANE_GAP_PX,
                             rows * (LANE_CAP_PX + th) + (rows - 1) * LANE_GAP_PX), "white")
     dr = ImageDraw.Draw(img)
@@ -1673,7 +1718,7 @@ def _render_lane_sheet(cells: List[Dict[str, Any]], cols: int, path: Path, font:
         with Image.open(c["path"]) as fr:
             fr = fr.convert("RGB")
             if fr.size != (tw, th):
-                fr = fr.resize((tw, th))
+                fr = fr.resize((tw, th), Image.LANCZOS)
             img.paste(fr, (x, y + LANE_CAP_PX))
     img.save(path, "JPEG", quality=85, optimize=True)
 
@@ -2230,6 +2275,10 @@ def main(argv: Optional[List[str]] = None) -> None:
     g.add_argument("--single-frames", action="store_true",
                    help="lane.md: one image per frame instead of contact sheets (3 overview frames or 6 frame-by-frame "
                         "ones to an image — same pixels per frame, a third to a sixth of the images to open)")
+    g.add_argument("--sheet-frames", type=int, metavar="N", choices=range(2, 13),
+                   help="lane.md: exactly N frames (2–12) to a contact sheet; more than fit at their own size → the frames are "
+                        "scaled so the sheet stays within Claude's limits (6 overview frames ≈ 75 %% of their size), the costs "
+                        "in the header follow — for a chat that counts the files of a message (claude.ai: 20)")
     g.add_argument("--native", action="store_true", help="the video file itself, fitted into 19 MB, goes into the Gemini payload")
     g.add_argument("--part", type=int, default=1, help="which native part goes into the Gemini payload (default 1)")
     g.add_argument("--model", help="model id for the payload / --ask (defaults: " + ", ".join(f"{k} {v}" for k, v in DEFAULT_MODELS.items()) + ")")
@@ -2328,6 +2377,7 @@ def main(argv: Optional[List[str]] = None) -> None:
            + (f" --out {shell_arg(out_dir)}" if a.out else "")
            # the settings that shape the files: a follow-up run without them would cut into other folders
            + (f" --names {a.names}" if a.names != "en" else "") + (" --single-frames" if a.single_frames else "")
+           + (f" --sheet-frames {a.sheet_frames}" if a.sheet_frames else "")
            + (f" --fps {a.fps}" if a.fps != FRAME_FPS else "") + (f" --max-frames {a.max_frames}" if a.max_frames else "")
            + (f" --language {a.language}" if a.language != "auto" else "")
            + (f" --whisper-model {shell_arg(a.whisper_model)}" if a.whisper_model != "small" else "")
@@ -2346,9 +2396,19 @@ def main(argv: Optional[List[str]] = None) -> None:
     prompt = a.ask or a.prompt
     written = []
     if "md" in formats:
-        grid = lane_sheet_plan(m, dense, enabled=not a.single_frames)
+        want = a.sheet_frames or 0
+        grid = lane_sheet_plan(m, dense, enabled=not a.single_frames, want=want)
+        sheet_tokens = None
+        if want > 1:  # the frames are scaled on their sheets — the header's costs follow, for both lanes
+            def _wh(fr: List[Dict[str, Any]]) -> Optional[List[int]]:
+                return jpeg_size(fr[0]["file"]) if fr else None
+            over_wh = _wh(m.get("frames") or [])
+            dense_wh = _wh(d.get("frames") or []) or (
+                [int(x) for x in fit_dims(m["probe"]["width"], m["probe"]["height"], DENSE_WIDTH)] if over_wh else None)
+            sheet_tokens = {"over": sheet_frame_tokens(over_wh, lane_grid(*over_wh, want=want)) if over_wh else 0,
+                            "dense": sheet_frame_tokens(dense_wh, lane_grid(*dense_wh, want=want)) if dense_wh else 0}
         md_blocks = lane_blocks(m, a.label, start, a.max_frames or (None if dense else LANE_MD_FRAMES), dense, end=end,
-                                rerun=rerun, per_sheet=grid[0] * grid[1], fps_overview=a.fps)
+                                rerun=rerun, per_sheet=grid[0] * grid[1], fps_overview=a.fps, sheet_tokens=sheet_tokens)
         md_blocks = agent_sheets(md_blocks, grid)
         path = out_dir / f"lane{suffix}.md"; write_markdown(md_blocks, prompt, path); written.append(path)
     payloads: Dict[str, Dict[str, Any]] = {}

@@ -119,6 +119,10 @@ their own (in an earlier round, before the rules, two of them did).
   model's message itself; `--agent-tool NAME` makes the header ask the model to call that tool
   (`{"video", "what": "next" | "frames" | "sounds", "start", "end"}`) instead of giving it commands.
   This is how Deep Artisan uses the script.
+- **Fewer files for a chat that counts them.** `--sheet-frames 6` puts six frames on every sheet instead of the
+  three (portrait) or four that fit at their own size: the frames are scaled so the sheet stays within Claude's
+  limits (≈ 74 % of their size, 1505 tokens a sheet instead of 448 a frame), the header's costs follow. claude.ai
+  takes 20 files a message and has an upload quota — Deep Artisan sends 20 such sheets (120 frames) a part there.
 - **Anchors and frame numbers.** A frame-by-frame request is anchored on two overview frames by their tags,
   both included. The overview frame `[00:12]` is the first frame at or after 12.000 s, and the
   frame-by-frame lane tags that same frame `[00:12.00 #360]` — time and the frame's number in the video,
@@ -248,7 +252,7 @@ nothing installed — only the right format to attach.
 | **Claude Code**, as a skill | put `agents/SKILL.md` and `video2llm.py` into `~/.claude/skills/video2llm/` — found whenever a video comes up, no path to edit |
 | **Claude Cowork** | the same two files in a folder `video2llm`, zipped, at *Customize → Skills* in the Claude app — or say the line below in the chat; keep the video inside the folder you connected |
 | **Claude** app / claude.ai (chat) | nothing to install: `python3 video2llm.py clip.mp4 --format pdf`, attach `lane.pdf` |
-| **Deep Artisan** | nothing to install: attach the video — the app runs this script itself, puts the sheets into the model's message (`lane.json`) and executes the model's `video` requests (`--agent-tool`); the chip's toggle turns 1 a second into 2–4 (`--fps`) |
+| **Deep Artisan** | nothing to install: attach the video — the app runs this script itself, puts the sheets into the model's message (`lane.json`) and executes the model's `video` requests (`--agent-tool`); the chip's toggle turns 1 a second into 2–4 (`--fps`); on the Anthropic subscription channel six frames to a sheet (`--sheet-frames 6`) |
 | **Cursor** | `agents/.cursor/rules/video2llm.mdc` into the project's `.cursor/rules/` |
 | **Codex CLI** | `agents/AGENTS.md` into the project root, or `~/.codex/AGENTS.md` |
 | **Antigravity** | `agents/AGENTS.md` into the project root, or `~/.gemini/AGENTS.md` |
@@ -284,11 +288,12 @@ python3 video2llm.py long.mp4 --start 2:30                           # the next 
 python3 video2llm.py clip.mp4 --single-frames                        # lane.md with one image per frame
 python3 video2llm.py clip.mp4 --fps 3                                # a denser overview: 3 frames a second, added to the same folder
 python3 video2llm.py clip.mp4 --agent-tool video                     # for a harness with its own tool: the header says "call video with {…}"
+python3 video2llm.py clip.mp4 --sheet-frames 6                       # six frames to a sheet (scaled to fit) — half the files for a chat that counts them
 python3 video2llm.py clip.mp4 --native --format gemini               # the video itself, fitted into 19 MB
 ```
 
 ```
-video2llm 0.2.0 — IMG_2056.MOV
+video2llm 0.3.0 — IMG_2056.MOV
   [probe] 100% — 720×1280, 02:29, 30.00 fps, audio
   frames: 1 per second over the whole video, 768px on the long side — frame by frame for a moment: --frames all --start mm:ss --end mm:ss (up to 4.0 s)
   [frames] 100% — 149 frames at 1/s
@@ -439,6 +444,8 @@ Notices for the models and tools it downloads: [THIRD-PARTY-NOTICES.md](THIRD-PA
 
 Every version is on the [Releases](../../releases) page.
 
+- v0.3.0 — `--sheet-frames N`: more frames to a sheet, scaled to Claude's limits — half the files for a chat
+  that counts them (claude.ai); the header's costs follow.
 - v0.2.0 — a denser overview on request (`--fps 2 | 3 | 4`, the frames join the same folder), `lane.json`
   beside every `lane.md` for a program that builds the model's message itself, `--agent-tool NAME` for a
   harness with its own tool (how Deep Artisan runs the script).

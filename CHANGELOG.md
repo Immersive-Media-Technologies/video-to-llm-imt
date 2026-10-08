@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.3.0] — 2026-10-08
+
+- **`--sheet-frames N`** — exactly N frames (2–12) to a contact sheet in `lane.md`: more than fit at their own
+  size are scaled so the sheet stays within Claude's limits (6 overview frames ≈ 74 % of their size, 1505 tokens
+  a sheet instead of 448 a frame), in the grid that scales them the least (3 × 2 portrait, 2 × 3 landscape); the
+  costs in the header follow. For a chat that counts the files of a message — claude.ai takes 20 and has an
+  upload quota; Deep Artisan uses it on the Anthropic subscription channel (20 sheets × 6 = 120 frames a part).
+
 ## [0.2.0] — 2026-10-08
 
 - **A denser overview on request** — `--fps 2 | 3 | 4`: the frames between the seconds join the same folder

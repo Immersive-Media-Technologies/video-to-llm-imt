@@ -132,6 +132,25 @@ def test_lane_json_mirrors_lane_md_for_a_program(clip):
     assert all(b["sheet"] and Path(b["path"]).is_file() for b in imgs)
 
 
+def test_sheet_frames_packs_more_frames_to_a_sheet_scaled_to_the_limits(clip):
+    """--sheet-frames 6 (a chat that counts files): six frames to a sheet, scaled so the sheet stays within
+    Claude's limits; the header's costs follow the scale."""
+    out = frames_dir(clip)
+    run(clip, "--no-transcript", "--sheet-frames", "6")
+    j = json.loads((out / "lane.json").read_text(encoding="utf-8"))
+    imgs = [b for b in j["blocks"] if b["type"] == "image"]
+    assert [b["frames"] for b in imgs] == [["00:00", "00:01", "00:02", "00:03", "00:04", "00:05"]]
+    w, h = video2llm.jpeg_size(imgs[0]["path"])
+    assert max(w, h) <= 1568 and video2llm.claude_image_tokens(w, h) <= 1568
+    assert (w, h) == (965, 1186)                                    # 3 × 2, every frame at 319×567 (74 %)
+    head = j["blocks"][0]["text"]
+    assert "6 frames to a sheet" in head
+    assert video2llm.sheet_frame_tokens([432, 768], [3, 2]) == 251  # 1505 tokens a sheet ÷ 6, instead of 448 a frame
+    assert video2llm.lane_grid(432, 768, want=6) == [3, 2] and video2llm.lane_grid(768, 432, want=6) == [2, 3]
+    assert video2llm.lane_grid(432, 768, want=4) == [2, 2] and video2llm.sheet_fit(432, 768, 2, 2) > 0.9
+    run(clip, "--no-transcript")                                     # the whole lane again for the tests below
+
+
 def test_agent_tool_header_calls_the_tool_instead_of_commands(clip):
     out = frames_dir(clip)
     run(clip, "--no-transcript", "--agent-tool", "video", "--max-frames", "3")
