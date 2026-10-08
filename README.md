@@ -295,7 +295,7 @@ python3 video2llm.py https://youtu.be/…                              # a video
 ```
 
 ```
-video2llm 0.5.0 — IMG_2056.MOV
+video2llm 0.5.1 — IMG_2056.MOV
   [probe] 100% — 720×1280, 02:29, 30.00 fps, audio
   frames: 1 per second over the whole video, 768px on the long side — frame by frame for a moment: --frames all --start mm:ss --end mm:ss (up to 4.0 s)
   [frames] 100% — 149 frames at 1/s
@@ -400,9 +400,10 @@ run them).
   (`VIDEO2LLM_DOWNLOADS` moves it), and the lane goes next to that file; the same URL again is not fetched twice. yt-dlp is the only thing to
   install for that (`pip install yt-dlp`, `brew install yt-dlp`, `winget install yt-dlp`); a playlist URL takes
   its one video. Private or DRM-protected videos are not downloaded.
-- **The site's captions instead of Whisper:** with a URL, the subtitles are saved beside the file (manual ones in
-  your `--language` / ru / en, and the automatic track in the original language) and the lane uses them — no
-  transcription at all, and the words are the site's own. Any `.vtt` / `.srt` beside a local video is used the
+- **The site's captions instead of Whisper:** with a URL, the subtitles are saved beside the file — the languages of
+  `--captions` (default: your computer's UI language), the video's own, ru, en, and the automatic original track —
+  and the lane uses them: no transcription at all, and the words are the site's own. A manual track in the video's
+  language is read first, the site's machine translation into your language last. No captions → Whisper. Any `.vtt` / `.srt` beside a local video is used the
   same way (`clip.ru.srt`, `clip.srt`); `--force-whisper` ignores them. The header tells the model the words
   are captions.
 - 150 overview frames (2½ minutes, 50 sheets, ≈ 67,000 Claude tokens) per lane; a longer video comes in
@@ -455,6 +456,8 @@ Notices for the models and tools it downloads: [THIRD-PARTY-NOTICES.md](THIRD-PA
 
 Every version is on the [Releases](../../releases) page.
 
+- v0.5.1 — `--captions LANGS`: which subtitle languages to fetch and prefer; manual tracks before machine
+  translations (yt-dlp's info file).
 - v0.5.0 — the site's captions (and any `.vtt` / `.srt` beside a video) stand in for Whisper; `--download-only`
   for a program that runs the rest itself.
 - v0.4.1 — `--yt-dlp` takes a command line too; the Windows test of the download path.

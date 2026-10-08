@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.5.1] — 2026-10-08
+
+- **Which captions:** `--captions LANGS` (default: this computer's UI language) names the subtitle languages to
+  fetch and prefer; the video's own language and ru/en are always taken too. yt-dlp's `info.json` beside the
+  file says which tracks are manual and what the video's language is, so the choice is: a manual track in the
+  video's language, a manual one in a preferred language, the automatic original (`*-orig`), and the site's
+  machine translation into a preferred language last — it is the least faithful. The header says whether the
+  captions were written by people or are automatic. No captions at all → Whisper as before.
+
 ## [0.5.0] — 2026-10-08
 
 - **The site's captions stand in for Whisper.** With a URL, yt-dlp also saves the subtitles beside the file

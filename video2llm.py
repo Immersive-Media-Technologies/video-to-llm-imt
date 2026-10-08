@@ -68,7 +68,7 @@ import zipfile
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
-VERSION = "0.5.0"
+VERSION = "0.5.1"
 
 # ── constants (same numbers as the Deep Artisan pipeline) ────────────────────────────────────────
 NATIVE_LIMIT_BYTES = 19 * 1024 * 1024  # Gemini request limit 20 MB minus headroom
@@ -880,10 +880,14 @@ def parse_captions(text: str) -> List[Dict[str, Any]]:
     return out
 
 
-def captions_beside(source: Path, language: Optional[str]) -> Optional[Dict[str, Any]]:
+def captions_beside(source: Path, language: Optional[str], prefer: Optional[List[str]] = None) -> Optional[Dict[str, Any]]:
     """A subtitle file next to the video — `<name>.<lang>.vtt` / `.srt` as yt-dlp writes them, or plain
-    `<name>.vtt` / `.srt`. Preferred: --language; a site's original automatic track (`*-orig`); then
-    ru, en; then any. {file, language, segments} or None."""
+    `<name>.vtt` / `.srt`. Which one, when there are several: --language first; then, with the site's
+    `<name>.info.json` beside the file (yt-dlp), a MANUAL track in the video's own language, a manual one
+    in a preferred language (--captions: the chat's language, the system's UI language), the automatic
+    track in the original language (`*-orig`), an automatic one in a preferred language (the site's
+    machine translation — last, it is the least faithful); without the info file: --language, `*-orig`,
+    the preferred languages, ru, en, any. {file, language, segments, kind} or None."""
     stem = source.stem
     cands: List[Path] = []
     for f in source.parent.iterdir():
@@ -893,22 +897,56 @@ def captions_beside(source: Path, language: Optional[str]) -> Optional[Dict[str,
             cands.append(f)
     if not cands:
         return None
+    manual: set = set()
+    auto: set = set()
+    original = ""
+    info = source.with_name(stem + ".info.json")
+    if info.is_file():
+        try:
+            j = json.loads(info.read_text(encoding="utf-8", errors="replace"))
+            manual = {str(k).lower() for k in (j.get("subtitles") or {}).keys()}
+            auto = {str(k).lower() for k in (j.get("automatic_captions") or {}).keys()}
+            original = str(j.get("language") or "").lower()
+        except (OSError, ValueError):
+            pass
+    pref = [x.lower() for x in (prefer or []) if x]
 
     def lang_of(f: Path) -> str:
-        return f.stem[len(stem) + 1:] if f.stem != stem else ""
+        return f.stem[len(stem) + 1:].lower() if f.stem != stem else ""
+
+    def base(lg: str) -> str:
+        return lg.replace("-orig", "").split("-")[0]
 
     def rank(f: Path) -> tuple:
-        lg = lang_of(f).lower()
-        pref = (language or "").lower()
-        return (0 if pref and pref != "auto" and lg.startswith(pref) else
-                1 if lg.endswith("-orig") else 2 if lg.startswith("ru") else 3 if lg.startswith("en") else 4,
-                0 if f.suffix.lower() == ".vtt" else 1, lg)
+        lg = lang_of(f)
+        want = (language or "").lower()
+        if want and want != "auto" and base(lg) == base(want):
+            r = 0
+        elif lg.endswith("-orig"):
+            r = 3 if (manual or auto) else 1
+        elif lg in manual and original and base(lg) == original:
+            r = 1
+        elif lg in manual and any(base(lg) == base(x) for x in pref):
+            r = 2
+        elif lg in manual:
+            r = 4
+        elif lg in auto and original and base(lg) == original:
+            r = 3
+        elif any(base(lg) == base(x) for x in pref):
+            r = 5 if (manual or auto) else 2
+        elif base(lg) in ("ru", "en"):
+            r = 6
+        else:
+            r = 7
+        return (r, 0 if f.suffix.lower() == ".vtt" else 1, lg)
     f = sorted(cands, key=rank)[0]
     try:
         segs = parse_captions(f.read_text(encoding="utf-8", errors="replace"))
     except OSError:
         return None
-    return {"file": f, "language": lang_of(f).replace("-orig", "") or None, "segments": segs}
+    lg = lang_of(f)
+    kind = ("manual" if lg in manual else "automatic" if (lg in auto or lg.endswith("-orig")) else "file")
+    return {"file": f, "language": base(lg) or None, "segments": segs, "kind": kind}
 
 
 URL_RE = re.compile(r"^https?://", re.I)
@@ -948,18 +986,23 @@ def download_dir() -> Path:
 
 
 def yt_dlp_args(exe: List[str], url: str, dest: Path, ffmpeg: str, id_file: Path, path_file: Path,
-                language: Optional[str] = None) -> List[str]:
+                language: Optional[str] = None, prefer: Optional[List[str]] = None) -> List[str]:
     """One video (no playlist), the best streams up to 1080p merged into an mp4 — the lane never needs
     more; the site's subtitles beside it as .vtt (manual ones in the asked language / ru / en, and the
     automatic track in the original language — `*-orig`) — they stand in for Whisper; the id and the
     final path are written to files (the console is progress only)."""
-    pref = f"{language}," if language and language != "auto" else ""
+    langs: List[str] = []
+    for x in ([language] if language and language != "auto" else []) + list(prefer or []) + ["ru", "en"]:
+        if x and x not in langs:
+            langs.append(x)
     # exact codes, not patterns: `ru.*` also matched YouTube's translated tracks (ru-en, …), and a dozen
-    # subtitle requests got a 429; a subtitle that fails must not take the video down with it (-i)
+    # subtitle requests got a 429; a subtitle that fails must not take the video down with it (-i);
+    # the info file says which tracks are manual and what the video's language is (captions_beside)
     return exe + ["--no-playlist", "--no-warnings", "--newline", "--progress", "--ignore-errors", "--no-abort-on-error",
                   "-f", "bv*[height<=1080]+ba/b[height<=1080]/bv*+ba/b", "-S", "res:1080,vcodec:h264,ext:mp4:m4a",
                   "--merge-output-format", "mp4", "--ffmpeg-location", str(Path(ffmpeg).resolve().parent),
-                  "--write-subs", "--write-auto-subs", "--sub-langs", f"{pref}.*-orig,ru,en,-live_chat",
+                  "--write-info-json", "--no-clean-info-json",
+                  "--write-subs", "--write-auto-subs", "--sub-langs", ",".join(langs) + ",.*-orig,-live_chat",
                   "--sub-format", "vtt/srt/best", "--convert-subs", "vtt",
                   "-o", str(dest / "%(title).60B [%(id)s].%(ext)s"),
                   "--print-to-file", "%(id)s", str(id_file),
@@ -968,7 +1011,7 @@ def yt_dlp_args(exe: List[str], url: str, dest: Path, ffmpeg: str, id_file: Path
 
 
 def download_video(url: str, tools: "Tools", progress: Progress, override: Optional[str] = None,
-                   language: Optional[str] = None) -> Path:
+                   language: Optional[str] = None, prefer: Optional[List[str]] = None) -> Path:
     """A URL on the command line (YouTube, Vimeo, a direct link — whatever yt-dlp knows): download it
     once into <Videos>/video2llm/downloads and go on as with a local file. A video downloaded before is
     found by its id and not fetched again."""
@@ -990,7 +1033,7 @@ def download_video(url: str, tools: "Tools", progress: Progress, override: Optio
                     last[0] = pct
                     progress("download", pct)
         try:
-            r = run(yt_dlp_args(exe, url, dest, tools.ffmpeg, id_file, path_file, language), on_line)
+            r = run(yt_dlp_args(exe, url, dest, tools.ffmpeg, id_file, path_file, language, prefer), on_line)
         except OSError as e:   # a broken shebang, a venv moved elsewhere, no permission
             sys.exit(f"yt-dlp could not be run ({' '.join(exe)}): {e}")
         vid = id_file.read_text(encoding="utf-8").strip().splitlines()[-1] if id_file.exists() and id_file.read_text(encoding="utf-8").strip() else ""
@@ -1176,6 +1219,7 @@ def dense_span(p: Dict[str, Any], start: float, end: Optional[float]) -> Dict[st
 
 def prepare(source: Path, out_dir: Path, tools: Tools, names: Dict[str, str], *, frames_mode: str,
             span: Optional[List[Optional[float]]] = None, transcript: bool, force_whisper: bool = False,
+            captions_prefer: Optional[List[str]] = None,
             sounds: bool, sound_threshold: float, native: bool, whisper_model: str, language: Optional[str],
             progress: Progress, sounds_model: Optional[str] = None, voice_rescue: bool = False,
             overview_fps: int = FRAME_FPS) -> Dict[str, Any]:
@@ -1272,13 +1316,13 @@ def prepare(source: Path, out_dir: Path, tools: Tools, names: Dict[str, str], *,
     sound_spans: List[Dict[str, Any]] = m.get("sound_spans") or []
     want_tr = transcript and p["has_audio"] and segs is None
     if want_tr and not force_whisper:
-        cap = captions_beside(source, language if language != "auto" else None)
+        cap = captions_beside(source, language if language != "auto" else None, captions_prefer)
         if cap is not None:
             segs = cap["segments"]
             tr_meta = {"language": cap["language"], "language_source": "captions", "gate": "captions",
-                       "source": "captions", "file": cap["file"].name}
+                       "source": "captions", "kind": cap["kind"], "file": cap["file"].name}
             (out_dir / "transcript.txt").write_text("\n".join(seg_line(x) for x in segs) + "\n", encoding="utf-8")
-            progress("transcript", 100, f"{len(segs)} segments from {cap['file'].name} (the site's captions, no Whisper)")
+            progress("transcript", 100, f"{len(segs)} segments from {cap['file'].name} ({cap['kind']} captions, no Whisper)")
             want_tr = False
     if want_tr:
         import importlib.util
@@ -1519,7 +1563,10 @@ def lane_blocks(m: Dict[str, Any], label: str, start: float, max_frames: Optiona
     if not p["has_audio"]:
         audio_note = "no audio"
     elif m.get("transcript") is not None and (m.get("transcript_meta") or {}).get("source") == "captions":
-        audio_note = ("with audio (the words are the site's own captions — automatic ones can mishear, read them with the frames"
+        kind = (m.get("transcript_meta") or {}).get("kind")
+        audio_note = ("with audio (the words are the site's own captions"
+                      + (" — automatic ones, they can mishear; read them with the frames" if kind == "automatic" else
+                         ", written by people" if kind == "manual" else " — read them with the frames")
                       + ("" if m.get("transcript") else ": the caption file is empty") + sounds_note + ")")
     elif m.get("transcript") is not None:
         audio_note = ("with audio (automatic speech transcript — it can mishear words, read it with the frames"
@@ -2511,6 +2558,11 @@ def main(argv: Optional[List[str]] = None) -> None:
                    help="small (default, as in Deep Artisan) or base (faster) — downloaded once from this project's release; "
                         "or the path to a folder with any other CTranslate2 Whisper model")
     g.add_argument("--language", default="auto", help="transcript language code (default: auto-detect)")
+    g.add_argument("--captions", metavar="LANGS",
+                   help="with a URL: the subtitle languages to fetch and prefer, comma-separated, e.g. \"es,en\" — your "
+                        "chat's language first (default: this computer's UI language); the video's own language and ru/en "
+                        "are always taken too, and a manual track in the video's own language is read before a "
+                        "machine-translated one")
     g = ap.add_argument_group("other")
     g.add_argument("--out", help="output folder (default: <video>_frames next to the video)")
     g.add_argument("--names", choices=["en", "ru"], default="en", help="language of the folder names (ru = as in Deep Artisan)")
@@ -2538,9 +2590,10 @@ def main(argv: Optional[List[str]] = None) -> None:
 
     tools = Tools(find_tool("ffmpeg", a.ffmpeg), find_tool("ffprobe", a.ffprobe))
     progress = make_progress(a.quiet)
+    captions_prefer = [x.strip() for x in (a.captions or "").split(",") if x.strip()] or ([os_language()] if os_language() else [])
     if URL_RE.match(a.video.strip()):
         log(f"video2llm {VERSION} — {a.video.strip()}")
-        source = download_video(a.video.strip(), tools, progress, a.yt_dlp, a.language).resolve()
+        source = download_video(a.video.strip(), tools, progress, a.yt_dlp, a.language, captions_prefer).resolve()
         if a.download_only:
             print(str(source), flush=True)
             return
@@ -2582,7 +2635,7 @@ def main(argv: Optional[List[str]] = None) -> None:
             "--out <local folder> keeps them on this computer")
     names = NAMES[a.names]
     m = prepare(source, out_dir, tools, names, frames_mode=a.frames, span=[start, end], transcript=not a.no_transcript,
-                force_whisper=a.force_whisper,
+                force_whisper=a.force_whisper, captions_prefer=captions_prefer,
                 sounds=a.sounds, sound_threshold=a.sound_threshold, native=a.native, whisper_model=a.whisper_model,
                 language=a.language, progress=progress, sounds_model=a.sounds_model, voice_rescue=a.voice_rescue,
                 overview_fps=a.fps)
@@ -2605,7 +2658,7 @@ def main(argv: Optional[List[str]] = None) -> None:
            + (f" --names {a.names}" if a.names != "en" else "") + (" --single-frames" if a.single_frames else "")
            + (f" --sheet-frames {a.sheet_frames}" if a.sheet_frames else "")
            + (f" --fps {a.fps}" if a.fps != FRAME_FPS else "") + (f" --max-frames {a.max_frames}" if a.max_frames else "")
-           + (f" --language {a.language}" if a.language != "auto" else "")
+           + (f" --language {a.language}" if a.language != "auto" else "") + (f" --captions {a.captions}" if a.captions else "")
            + (f" --whisper-model {shell_arg(a.whisper_model)}" if a.whisper_model != "small" else "")
            + (f" --sound-threshold {a.sound_threshold:g}" if a.sound_threshold != 0.15 else "")
            + (f" --ffmpeg {shell_arg(a.ffmpeg)}" if a.ffmpeg else "") + (f" --ffprobe {shell_arg(a.ffprobe)}" if a.ffprobe else "")

@@ -370,10 +370,15 @@ if dest.exists():      # yt-dlp skips a file it downloaded before and the after_
     print("[download] " + str(dest) + " has already been downloaded")
     sys.exit(0)
 shutil.copy(os.environ["VIDEO2LLM_TEST_CLIP"], dest)
-if "--write-subs" in args:   # the site's captions beside the file, as yt-dlp writes them
-    (out / "Title [abc123].en-orig.vtt").write_text(
+if "--write-subs" in args:   # the site's captions beside the file, as yt-dlp writes them: a manual English
+    # track (the video's language) and YouTube's machine translation into Russian; the info file tells which is which
+    (out / "Title [abc123].en.vtt").write_text(
         "WEBVTT\\n\\n00:00:00.500 --> 00:00:02.000\\nhello from the captions\\n\\n00:00:03.000 --> 00:00:05.000\\nsecond line\\n",
         encoding="utf-8")
+    (out / "Title [abc123].ru.vtt").write_text(
+        "WEBVTT\\n\\n00:00:00.500 --> 00:00:02.000\\nprivet iz perevoda\\n", encoding="utf-8")
+    (out / "Title [abc123].info.json").write_text(
+        '{"language": "en", "subtitles": {"en": []}, "automatic_captions": {"en-orig": [], "ru": []}}', encoding="utf-8")
 print("[download]  50.0% of 1.00MiB")
 print("[download] 100.0% of 1.00MiB")
 prints["after_move:filepath"].write_text(str(dest) + "\\n", encoding="utf-8")
@@ -393,12 +398,17 @@ def test_a_url_is_downloaded_with_yt_dlp_then_treated_as_a_file(clip, tmp_path):
     env["VIDEO2LLM_TEST_CLIP"] = str(clip)
     env["VIDEO2LLM_DOWNLOADS"] = str(tmp_path / "downloads")   # this test's folder, not the user's Videos
     out = tmp_path / "lane"
-    r = run("https://example.com/watch?v=abc123", "--out", out, env=env)   # no --no-transcript: the captions stand in
+    # no --no-transcript: the captions stand in; --captions ru asks for Russian, but the manual English track —
+    # the video's own language — is read before the site's machine translation
+    r = run("https://example.com/watch?v=abc123", "--captions", "ru", "--out", out, env=env)
     assert "[download] 100%" in r.stderr
-    assert "the site's captions, no Whisper" in r.stderr and "faster-whisper" not in r.stderr
+    assert "(manual captions, no Whisper)" in r.stderr and "faster-whisper" not in r.stderr
     head = (out / "lane.md").read_text(encoding="utf-8")
     assert 'video "Title [abc123].mp4"' in head
-    assert "the site's own captions" in head and "hello from the captions" in head and "second line" in head
+    assert "site's own captions, written by people" in head and "hello from the captions" in head and "second line" in head
+    assert "privet iz perevoda" not in head
+    args = video2llm.yt_dlp_args(["x"], "u", tmp_path, FFMPEG, tmp_path / "i", tmp_path / "p", None, ["es"])
+    assert args[args.index("--sub-langs") + 1] == "es,ru,en,.*-orig,-live_chat" and "--write-info-json" in args
     assert "Title [abc123].mp4" in head.split("run ")[1]   # the rerun command names the downloaded file, not the URL
     assert "--write-subs" in video2llm.yt_dlp_args(["x"], "u", tmp_path, FFMPEG, tmp_path / "i", tmp_path / "p")
     # --download-only: the path on stdout, nothing else written
@@ -474,8 +484,8 @@ def test_a_subtitle_file_beside_the_video_stands_in_for_whisper(clip, tmp_path):
     shutil.copy(clip, v)
     (tmp_path / "with subs.ru.srt").write_text("1\n00:00:01,000 --> 00:00:02,500\nПривет, Даня!\n", encoding="utf-8")
     (tmp_path / "with subs.en.srt").write_text("1\n00:00:01,000 --> 00:00:02,500\nHi Danya!\n", encoding="utf-8")
-    r = run(v)   # transcript on, no Whisper: the file beside the video is used — ru before en
-    assert "the site's captions, no Whisper" in r.stderr
+    r = run(v, "--captions", "ru")   # transcript on, no Whisper: the file beside the video is used — the preferred one
+    assert "captions, no Whisper" in r.stderr
     head = (v.with_name("with subs_frames") / "lane.md").read_text(encoding="utf-8")
     assert "Привет, Даня!" in head and "Hi Danya!" not in head and "site's own captions" in head
     r2 = run(v, "--language", "en", "--out", tmp_path / "en_lane")   # --language picks the file
