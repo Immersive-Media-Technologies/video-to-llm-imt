@@ -351,3 +351,81 @@ def test_agent_files_carry_one_instruction():
     guide = (agents / "README.md").read_text(encoding="utf-8")
     for app in ("Claude Code", "Codex CLI", "Antigravity", "Gemini CLI", "Qwen Code", "Cursor", "Cowork"):
         assert app in guide, app
+
+
+FAKE_YT_DLP = """\
+# a stand-in for yt-dlp: copies the clip named in VIDEO2LLM_TEST_CLIP to the -o folder as
+# "Title [abc123].mp4" and writes the --print-to-file outputs the way yt-dlp does
+import os, shutil, sys
+from pathlib import Path
+args = sys.argv[1:]
+out = Path(args[args.index("-o") + 1]).parent
+prints = {}
+for i, a in enumerate(args):
+    if a == "--print-to-file":
+        prints[args[i + 1]] = Path(args[i + 2])
+dest = out / "Title [abc123].mp4"
+prints["%(id)s"].write_text("abc123\\n", encoding="utf-8")
+if dest.exists():      # yt-dlp skips a file it downloaded before and the after_move hook with it
+    print("[download] " + str(dest) + " has already been downloaded")
+    sys.exit(0)
+shutil.copy(os.environ["VIDEO2LLM_TEST_CLIP"], dest)
+print("[download]  50.0% of 1.00MiB")
+print("[download] 100.0% of 1.00MiB")
+prints["after_move:filepath"].write_text(str(dest) + "\\n", encoding="utf-8")
+"""
+
+
+def fake_yt_dlp_on_path(tmp_path):
+    """A `yt-dlp` first on PATH that runs the stand-in above with this Python."""
+    d = tmp_path / "fakebin"
+    d.mkdir(exist_ok=True)
+    py = d / "fake_yt_dlp.py"
+    py.write_text(FAKE_YT_DLP, encoding="utf-8")
+    if os.name == "nt":
+        (d / "yt-dlp.bat").write_text(f'@"{sys.executable}" "{py}" %*\n', encoding="utf-8")
+    else:
+        sh = d / "yt-dlp"
+        sh.write_text(f'#!{sys.executable}\nimport runpy, sys\nsys.argv[0] = r"{py}"\nrunpy.run_path(r"{py}", run_name="__main__")\n', encoding="utf-8")
+        sh.chmod(0o755)
+    return {"PATH": str(d) + os.pathsep + os.environ.get("PATH", ""), "VIDEO2LLM_YT_DLP": ""}
+
+
+def test_a_url_is_downloaded_with_yt_dlp_then_treated_as_a_file(clip, tmp_path):
+    env = fake_yt_dlp_on_path(tmp_path)
+    env["VIDEO2LLM_TEST_CLIP"] = str(clip)
+    env["VIDEO2LLM_DOWNLOADS"] = str(tmp_path / "downloads")   # this test's folder, not the user's Videos
+    out = tmp_path / "lane"
+    r = run("https://example.com/watch?v=abc123", "--no-transcript", "--out", out, env=env)
+    assert "[download] 100%" in r.stderr
+    head = (out / "lane.md").read_text(encoding="utf-8")
+    assert 'video "Title [abc123].mp4"' in head
+    assert "Title [abc123].mp4" in head.split("run ")[1]   # the rerun command names the downloaded file, not the URL
+    # the same URL again: yt-dlp reports the file as downloaded already and video2llm finds it by its id
+    r2 = run("https://example.com/watch?v=abc123", "--no-transcript", "--out", out, env=env)
+    assert "[download] 100%" in r2.stderr and "Title [abc123].mp4" in r2.stderr and (out / "lane.md").exists()
+
+
+def test_yt_dlp_args_ask_for_one_mp4_up_to_1080p(tmp_path):
+    args = video2llm.yt_dlp_args(["yt-dlp"], "https://x/y", tmp_path, "/usr/bin/ffmpeg", tmp_path / "id", tmp_path / "p")
+    assert args[0] == "yt-dlp" and args[-1] == "https://x/y" and args[-2] == "--"
+    assert "--no-playlist" in args and "--merge-output-format" in args and args[args.index("--merge-output-format") + 1] == "mp4"
+    assert "[height<=1080]" in args[args.index("-f") + 1]
+    assert args[args.index("-o") + 1].startswith(str(tmp_path))
+    assert "after_move:filepath" in args
+
+
+def test_no_yt_dlp_says_how_to_install_it(tmp_path):
+    env = {"PATH": str(tmp_path), "VIDEO2LLM_YT_DLP": ""}
+    if has("yt_dlp"):
+        pytest.skip("the yt_dlp module is installed in this Python — it would be used")
+    # ffmpeg must still be found: point at it explicitly
+    r = run("https://example.com/v", "--ffmpeg", FFMPEG, "--ffprobe", shutil.which("ffprobe"), "--out", tmp_path / "o",
+            env=env, ok=False)
+    assert r.returncode != 0 and "yt-dlp" in r.stderr and ("pip install yt-dlp" in r.stderr or "install yt-dlp" in r.stderr)
+
+
+def test_agent_tool_header_names_the_frame_files(clip):
+    run(clip, "--no-transcript", "--agent-tool", "video")
+    head = (frames_dir(clip) / "lane.md").read_text(encoding="utf-8")
+    assert "frames_1fps_768px" in head and "/mm-ss.jpg" in head and "only when the user asks for that frame as a file" in head

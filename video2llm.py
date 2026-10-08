@@ -68,7 +68,7 @@ import zipfile
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
-VERSION = "0.3.0"
+VERSION = "0.4.0"
 
 # ── constants (same numbers as the Deep Artisan pipeline) ────────────────────────────────────────
 NATIVE_LIMIT_BYTES = 19 * 1024 * 1024  # Gemini request limit 20 MB minus headroom
@@ -819,6 +819,86 @@ def fallback_out_dir(source: Path) -> Path:
     sys.exit(f"cannot write next to the video nor to {root} — pass --out with a folder you can write to")
 
 
+URL_RE = re.compile(r"^https?://", re.I)
+
+
+def yt_dlp_command(override: Optional[str]) -> Optional[List[str]]:
+    """The yt-dlp to run: --yt-dlp / VIDEO2LLM_YT_DLP / the `yt-dlp` on PATH / the yt_dlp module of this
+    Python. None when there is none."""
+    cand = override or os.environ.get("VIDEO2LLM_YT_DLP") or shutil.which("yt-dlp")
+    if cand and (Path(cand).exists() or shutil.which(cand)):
+        return [cand]
+    import importlib.util
+    if importlib.util.find_spec("yt_dlp") is not None:
+        return [sys.executable, "-m", "yt_dlp"]
+    return None
+
+
+def download_dir() -> Path:
+    """<Videos>/video2llm/downloads (or VIDEO2LLM_DOWNLOADS) — the file a URL points to lands here; its
+    lane folder goes next to it as for any local file (<name>_frames)."""
+    env = os.environ.get("VIDEO2LLM_DOWNLOADS")
+    if env:
+        d = Path(env).expanduser()
+        if writable_dir(d):
+            return d
+        sys.exit(f"cannot write to VIDEO2LLM_DOWNLOADS {d}")
+    base = videos_dir()
+    root = (base if base.is_dir() else Path.home()) / "video2llm" / "downloads"
+    for cand in (root, Path(tempfile.gettempdir()) / "video2llm" / "downloads"):
+        if writable_dir(cand):
+            return cand
+    sys.exit(f"cannot write to {root} — nowhere to download the video")
+
+
+def yt_dlp_args(exe: List[str], url: str, dest: Path, ffmpeg: str, id_file: Path, path_file: Path) -> List[str]:
+    """One video (no playlist), the best streams up to 1080p merged into an mp4 — the lane never needs
+    more; the id and the final path are written to files (the console is progress only)."""
+    return exe + ["--no-playlist", "--no-warnings", "--newline", "--progress",
+                  "-f", "bv*[height<=1080]+ba/b[height<=1080]/bv*+ba/b", "-S", "res:1080,vcodec:h264,ext:mp4:m4a",
+                  "--merge-output-format", "mp4", "--ffmpeg-location", str(Path(ffmpeg).resolve().parent),
+                  "-o", str(dest / "%(title).60B [%(id)s].%(ext)s"),
+                  "--print-to-file", "%(id)s", str(id_file),
+                  "--print-to-file", "after_move:filepath", str(path_file),
+                  "--", url]
+
+
+def download_video(url: str, tools: "Tools", progress: Progress, override: Optional[str] = None) -> Path:
+    """A URL on the command line (YouTube, Vimeo, a direct link — whatever yt-dlp knows): download it
+    once into <Videos>/video2llm/downloads and go on as with a local file. A video downloaded before is
+    found by its id and not fetched again."""
+    exe = yt_dlp_command(override)
+    if not exe:
+        hint = {"darwin": "brew install yt-dlp", "win32": "winget install yt-dlp"}.get(sys.platform, "pip install yt-dlp")
+        sys.exit(f"a video URL needs yt-dlp. Install it ({hint}, or: pip install yt-dlp) or pass --yt-dlp /path/to/yt-dlp.")
+    dest = download_dir()
+    with tempfile.TemporaryDirectory(prefix="video2llm-dl-") as td:
+        id_file, path_file = Path(td) / "id.txt", Path(td) / "path.txt"
+        progress("download", 0, url)
+        last = [-1]
+
+        def on_line(line: str) -> None:
+            m = re.search(r"\[download\]\s+([\d.]+)%", line)
+            if m:
+                pct = int(float(m.group(1)))
+                if pct != last[0]:
+                    last[0] = pct
+                    progress("download", pct)
+        r = run(yt_dlp_args(exe, url, dest, tools.ffmpeg, id_file, path_file), on_line)
+        vid = id_file.read_text(encoding="utf-8").strip().splitlines()[-1] if id_file.exists() and id_file.read_text(encoding="utf-8").strip() else ""
+        got = path_file.read_text(encoding="utf-8").strip().splitlines()[-1] if path_file.exists() and path_file.read_text(encoding="utf-8").strip() else ""
+    file = Path(got) if got and Path(got).is_file() else None
+    if file is None and vid:  # downloaded earlier: yt-dlp skips the file and the after_move hook with it
+        cand = sorted((f for f in dest.iterdir() if f.is_file() and f.stem.endswith(f" [{vid}]") and not f.name.endswith(".part")),
+                      key=lambda f: f.stat().st_mtime)
+        file = cand[-1] if cand else None
+    if file is None:
+        tail = (r.stderr or r.stdout or "").strip().splitlines()
+        sys.exit("yt-dlp could not download the video" + (": " + tail[-1] if tail else "") + f" ({url})")
+    progress("download", 100, file.name)
+    return file
+
+
 _CLOUD_NAMES = (("yandex.disk", "Yandex Disk"), ("yandexdisk", "Yandex Disk"), ("onedrive", "OneDrive"),
                 ("dropbox", "Dropbox"), ("google drive", "Google Drive"), ("googledrive", "Google Drive"),
                 ("my drive", "Google Drive"), ("icloud", "iCloud Drive"), ("pcloud", "pCloud"), ("pclouddrive", "pCloud"),
@@ -1447,7 +1527,13 @@ def lane_blocks(m: Dict[str, Any], label: str, start: float, max_frames: Optiona
     if rerun:
         rules.append(f"Use only {rerun.these()} for this video. Do not search for or open the video file, do not run ffmpeg, "
                      "ffprobe or any other tool on it, do not read video2llm.json, and do not crop, zoom or combine frames "
-                     "yourself — open only the images the lanes link to. If a detail is too small to tell, say so.")
+                     "yourself — open only the images the lanes link to."
+                     # 08.10: with the sheets inline (--agent-tool) the model does not know where the frames are; asked for one
+                     # frame by name it searched the whole home folder for two minutes
+                     + (f" The overview frames themselves are the files {shell_arg(Path(lane[0]['file']).parent)}/mm-ss.jpg "
+                        f"({FRAME_WIDTH}px) — read one from there only when the user asks for that frame as a file."
+                        if rerun.tool and lane and not use_dense else "")
+                     + " If a detail is too small to tell, say so.")
         rules.append(rerun.cannot())
     else:
         rules.append("Do not cut frames from the video or analyse its sound some other way.")
@@ -2241,8 +2327,10 @@ def main(argv: Optional[List[str]] = None) -> None:
                                         "  video2llm clip.mp4 --format anthropic --prompt \"What goes wrong at 0:05?\"\n"
                                         "  video2llm clip.mp4 --native --format gemini   # the video itself, fitted to 19 MB\n"
                                         "  video2llm clip.mp4 --start 0:30          # the next 30 frames of a long video\n"
+                                        "  video2llm https://youtu.be/…              # a video by URL (yt-dlp), then the same\n"
                                         "  ANTHROPIC_API_KEY=… video2llm clip.mp4 --format anthropic --ask \"Describe the camera moves\"\n")
-    ap.add_argument("video", help="video file (mp4, mov, m4v, webm, mpeg, avi, 3gp …)")
+    ap.add_argument("video", help="video file (mp4, mov, m4v, webm, mpeg, avi, 3gp …) or a URL (YouTube, Vimeo, a direct link — "
+                                  "anything yt-dlp knows; downloaded once into <Videos>/video2llm/downloads, up to 1080p)")
     g = ap.add_argument_group("which frames")
     g.add_argument("--frames", choices=["1", "all"], default="1",
                    help="1 = one frame per second over the whole video, 768px (default) — what happens, who says what; "
@@ -2307,6 +2395,7 @@ def main(argv: Optional[List[str]] = None) -> None:
                    help="the lane is for an agent harness that runs this script itself: the header tells the model to call "
                         "the tool NAME with {video, what: next | frames | sounds, start, end} instead of giving it commands")
     g.add_argument("--ffmpeg", help="path to ffmpeg"); g.add_argument("--ffprobe", help="path to ffprobe")
+    g.add_argument("--yt-dlp", help="path to yt-dlp (for a video URL; default: the one on PATH or the yt_dlp module)")
     g.add_argument("--quiet", action="store_true")
     g.add_argument("--version", action="version",
                    version=f"V2L-IMT {VERSION} — © 2026 Immersive Media Technologies, IMT Non-Commercial License (non-commercial use only, "
@@ -2320,7 +2409,13 @@ def main(argv: Optional[List[str]] = None) -> None:
     if a.all_frames:
         a.frames = "all"
 
-    source = Path(a.video).expanduser().resolve()
+    tools = Tools(find_tool("ffmpeg", a.ffmpeg), find_tool("ffprobe", a.ffprobe))
+    progress = make_progress(a.quiet)
+    if URL_RE.match(a.video.strip()):
+        log(f"video2llm {VERSION} — {a.video.strip()}")
+        source = download_video(a.video.strip(), tools, progress, a.yt_dlp).resolve()
+    else:
+        source = Path(a.video).expanduser().resolve()
     try:
         with open(source, "rb"):
             pass
@@ -2354,8 +2449,6 @@ def main(argv: Optional[List[str]] = None) -> None:
         log(f"  [out] note: {out_dir} is synced by {cloud} — the frames and the audio will be uploaded there too; "
             "--out <local folder> keeps them on this computer")
     names = NAMES[a.names]
-    tools = Tools(find_tool("ffmpeg", a.ffmpeg), find_tool("ffprobe", a.ffprobe))
-    progress = make_progress(a.quiet)
     m = prepare(source, out_dir, tools, names, frames_mode=a.frames, span=[start, end], transcript=not a.no_transcript,
                 sounds=a.sounds, sound_threshold=a.sound_threshold, native=a.native, whisper_model=a.whisper_model,
                 language=a.language, progress=progress, sounds_model=a.sounds_model, voice_rescue=a.voice_rescue,

@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.4.0] — 2026-10-08
+
+- **A video by URL** — `video2llm https://youtu.be/…`: YouTube, Vimeo, a direct link, anything
+  [yt-dlp](https://github.com/yt-dlp/yt-dlp) knows (optional: `pip install yt-dlp` / `brew install yt-dlp` /
+  `winget install yt-dlp`, or `--yt-dlp PATH`). One video (no playlist), the best streams up to 1080p merged into
+  an mp4 by ffmpeg, downloaded once into `<Videos>/video2llm/downloads/`; the lane goes next to that file and the
+  rerun commands name the file, not the URL. The same URL again is found by its id and not fetched twice.
+- **`--agent-tool`: the header names the frame files** (`…/frames_1fps_768px/mm-ss.jpg`) — an agent asked for one
+  frame as a file reads it from there instead of searching the disk (a live case: two minutes of `find`).
+
 ## [0.3.0] — 2026-10-08
 
 - **`--sheet-frames N`** — exactly N frames (2–12) to a contact sheet in `lane.md`: more than fit at their own

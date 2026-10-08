@@ -159,7 +159,7 @@ Compared with the projects closest to it, from their READMEs as of 2026-10-07:
 | Sounds other than speech | **✅ local, free, on request per moment** | paid tier only | via Gemini API | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
 | Chat outputs | **PDF (Claude / Gemini) + contact sheets (ChatGPT, any chat)** + API bodies | grid sheets, viewer | — | — | — | — | — | one image | PDF |
 | Downloads at run time | **only from this repository** | Whisper models from their hosts | API calls | Whisper models from their hosts | Whisper models | models / APIs | — | OpenAI API | Google API |
-| Video URLs (YouTube etc.) | ❌ local files | ✅ | ✅ | ✅ | direct URLs | ✅ | ❌ | ❌ | ❌ |
+| Video URLs (YouTube etc.) | ✅ via yt-dlp, optional | ✅ | ✅ | ✅ | direct URLs | ✅ | ❌ | ❌ | ❌ |
 | Platforms named | macOS, Windows, Linux | macOS, Windows, Linux | macOS, Linux | macOS, Linux, Windows | macOS, Windows, Linux | macOS, Windows, Linux | macOS | — | Windows, macOS, Linux |
 
 What is ours and verified: the overview + frame-by-frame technique with anchors; the cost in the header;
@@ -179,6 +179,7 @@ One file, `video2llm.py`, on Python 3.9 or newer, with no server, no daemon and 
 | **PANNs CNN14** as ONNX on **ONNX Runtime** | the sounds other than speech, 527 AudioSet classes, 3 s of context around the moment | ONNX Runtime and numpy arrive with faster-whisper; the model comes from this repository's release |
 | **Pillow** | the contact sheets (3 overview frames or 6 frame-by-frame ones to an image) | `pip install pillow`; without it the lane links one image per frame |
 | **fpdf2** | `--format pdf` | optional, `pip install fpdf2` |
+| **yt-dlp** | a video by URL | optional, `pip install yt-dlp` / `brew install yt-dlp` / `winget install yt-dlp` |
 | the standard library | the lane, the manifest, the downloads with sha256 checks, the API request bodies | — |
 
 Everything runs on the CPU; the frames and the lane are written next to the video, the models go to
@@ -290,10 +291,11 @@ python3 video2llm.py clip.mp4 --fps 3                                # a denser 
 python3 video2llm.py clip.mp4 --agent-tool video                     # for a harness with its own tool: the header says "call video with {…}"
 python3 video2llm.py clip.mp4 --sheet-frames 6                       # six frames to a sheet (scaled to fit) — half the files for a chat that counts them
 python3 video2llm.py clip.mp4 --native --format gemini               # the video itself, fitted into 19 MB
+python3 video2llm.py https://youtu.be/…                              # a video by URL (yt-dlp): downloaded once, then the same
 ```
 
 ```
-video2llm 0.3.0 — IMG_2056.MOV
+video2llm 0.4.0 — IMG_2056.MOV
   [probe] 100% — 720×1280, 02:29, 30.00 fps, audio
   frames: 1 per second over the whole video, 768px on the long side — frame by frame for a moment: --frames all --start mm:ss --end mm:ss (up to 4.0 s)
   [frames] 100% — 149 frames at 1/s
@@ -393,7 +395,11 @@ run them).
 
 ## Limits worth knowing
 
-- Local video files only — no downloading from video sites.
+- A URL (YouTube, Vimeo, a direct link — whatever [yt-dlp](https://github.com/yt-dlp/yt-dlp) knows) is downloaded
+  once, up to 1080p as mp4, into `~/Movies/video2llm/downloads/` (`Videos\video2llm\downloads\`, `~/Videos/…`),
+  (`VIDEO2LLM_DOWNLOADS` moves it), and the lane goes next to that file; the same URL again is not fetched twice. yt-dlp is the only thing to
+  install for that (`pip install yt-dlp`, `brew install yt-dlp`, `winget install yt-dlp`); a playlist URL takes
+  its one video. Private or DRM-protected videos are not downloaded.
 - 150 overview frames (2½ minutes, 50 sheets, ≈ 67,000 Claude tokens) per lane; a longer video comes in
   parts, and the model fetches the next one itself with `--start` — the header names the price of a part.
   A 10-minute video watched whole is four parts, ≈ 270,000 tokens: the overview at 768 px is the deliberate
@@ -444,6 +450,9 @@ Notices for the models and tools it downloads: [THIRD-PARTY-NOTICES.md](THIRD-PA
 
 Every version is on the [Releases](../../releases) page.
 
+- v0.4.0 — a video by URL (YouTube, Vimeo, direct links — yt-dlp, optional): downloaded once up to 1080p into the
+  Videos folder, then everything as for a local file; with `--agent-tool` the header names the frame files so an
+  agent asked for one frame reads it instead of searching for it.
 - v0.3.0 — `--sheet-frames N`: more frames to a sheet, scaled to Claude's limits — half the files for a chat
   that counts them (claude.ai); the header's costs follow.
 - v0.2.0 — a denser overview on request (`--fps 2 | 3 | 4`, the frames join the same folder), `lane.json`
