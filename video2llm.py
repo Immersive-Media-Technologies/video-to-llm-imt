@@ -68,7 +68,7 @@ import zipfile
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
-VERSION = "0.4.1"
+VERSION = "0.5.0"
 
 # ── constants (same numbers as the Deep Artisan pipeline) ────────────────────────────────────────
 NATIVE_LIMIT_BYTES = 19 * 1024 * 1024  # Gemini request limit 20 MB minus headroom
@@ -819,6 +819,98 @@ def fallback_out_dir(source: Path) -> Path:
     sys.exit(f"cannot write next to the video nor to {root} — pass --out with a folder you can write to")
 
 
+# ── captions beside the video (a site's subtitles, or any .vtt / .srt the user puts there) ──
+_TS_RE = re.compile(r"(?:(\d+):)?(\d{1,2}):(\d{2})[.,](\d{1,3})")
+
+
+def _ts(s: str) -> float:
+    m = _TS_RE.search(s)
+    if not m:
+        return 0.0
+    h, mi, se, frac = m.groups()
+    return (int(h or 0) * 3600 + int(mi) * 60 + int(se) + int(frac.ljust(3, "0")) / 1000.0)
+
+
+def parse_captions(text: str) -> List[Dict[str, Any]]:
+    """WebVTT or SRT → [{start, end, text}]. YouTube's automatic captions roll: every cue repeats the
+    previous line and adds the new one word by word (<00:00:01.500><c> word</c>) — tags are dropped and
+    a line already given by the previous cue is not given again, so each line comes once, at the
+    time it first appears. Manual subtitles pass through as they are."""
+    out: List[Dict[str, Any]] = []
+    prev_lines: List[str] = []
+    cue_start = cue_end = None
+    buf: List[str] = []
+
+    def flush() -> None:
+        nonlocal buf, prev_lines
+        if cue_start is None:
+            buf = []
+            return
+        lines = [re.sub(r"\s+", " ", re.sub(r"<[^>]+>", "", ln)).strip() for ln in buf]
+        lines = [ln for ln in lines if ln and not ln.startswith("WEBVTT") and not re.fullmatch(r"\d+", ln)]
+        new = [ln for ln in lines if ln not in prev_lines]
+        if new and cue_end is not None and cue_end > cue_start:
+            if out and out[-1]["text"] == " ".join(new):
+                out[-1]["end"] = max(out[-1]["end"], cue_end)
+            else:
+                out.append({"start": cue_start, "end": cue_end, "text": " ".join(new)})
+        if lines:
+            prev_lines = lines
+        buf = []
+
+    for raw in text.replace("\r\n", "\n").split("\n"):
+        line = raw.rstrip("\r")
+        if "-->" in line:
+            flush()
+            a, b = line.split("-->", 1)
+            cue_start, cue_end = _ts(a), _ts(b)
+            continue
+        if line == "":   # a cue ends at an EMPTY line; YouTube puts a line of one space INSIDE its cues
+            flush()
+            cue_start = cue_end = None
+            continue
+        if cue_start is None:
+            continue  # header, NOTE, a cue number
+        buf.append(line)
+    flush()
+    # the rolling style leaves many 10 ms cues: give each line a span up to the next line
+    for i, seg in enumerate(out):
+        if seg["end"] - seg["start"] < 0.5 and i + 1 < len(out):
+            seg["end"] = max(seg["end"], min(out[i + 1]["start"], seg["start"] + 8.0))
+    return out
+
+
+def captions_beside(source: Path, language: Optional[str]) -> Optional[Dict[str, Any]]:
+    """A subtitle file next to the video — `<name>.<lang>.vtt` / `.srt` as yt-dlp writes them, or plain
+    `<name>.vtt` / `.srt`. Preferred: --language; a site's original automatic track (`*-orig`); then
+    ru, en; then any. {file, language, segments} or None."""
+    stem = source.stem
+    cands: List[Path] = []
+    for f in source.parent.iterdir():
+        if not f.is_file() or f.suffix.lower() not in (".vtt", ".srt"):
+            continue
+        if f.stem == stem or (f.stem.startswith(stem + ".") and "." not in f.stem[len(stem) + 1:]):
+            cands.append(f)
+    if not cands:
+        return None
+
+    def lang_of(f: Path) -> str:
+        return f.stem[len(stem) + 1:] if f.stem != stem else ""
+
+    def rank(f: Path) -> tuple:
+        lg = lang_of(f).lower()
+        pref = (language or "").lower()
+        return (0 if pref and pref != "auto" and lg.startswith(pref) else
+                1 if lg.endswith("-orig") else 2 if lg.startswith("ru") else 3 if lg.startswith("en") else 4,
+                0 if f.suffix.lower() == ".vtt" else 1, lg)
+    f = sorted(cands, key=rank)[0]
+    try:
+        segs = parse_captions(f.read_text(encoding="utf-8", errors="replace"))
+    except OSError:
+        return None
+    return {"file": f, "language": lang_of(f).replace("-orig", "") or None, "segments": segs}
+
+
 URL_RE = re.compile(r"^https?://", re.I)
 
 
@@ -855,19 +947,28 @@ def download_dir() -> Path:
     sys.exit(f"cannot write to {root} — nowhere to download the video")
 
 
-def yt_dlp_args(exe: List[str], url: str, dest: Path, ffmpeg: str, id_file: Path, path_file: Path) -> List[str]:
+def yt_dlp_args(exe: List[str], url: str, dest: Path, ffmpeg: str, id_file: Path, path_file: Path,
+                language: Optional[str] = None) -> List[str]:
     """One video (no playlist), the best streams up to 1080p merged into an mp4 — the lane never needs
-    more; the id and the final path are written to files (the console is progress only)."""
-    return exe + ["--no-playlist", "--no-warnings", "--newline", "--progress",
+    more; the site's subtitles beside it as .vtt (manual ones in the asked language / ru / en, and the
+    automatic track in the original language — `*-orig`) — they stand in for Whisper; the id and the
+    final path are written to files (the console is progress only)."""
+    pref = f"{language}," if language and language != "auto" else ""
+    # exact codes, not patterns: `ru.*` also matched YouTube's translated tracks (ru-en, …), and a dozen
+    # subtitle requests got a 429; a subtitle that fails must not take the video down with it (-i)
+    return exe + ["--no-playlist", "--no-warnings", "--newline", "--progress", "--ignore-errors", "--no-abort-on-error",
                   "-f", "bv*[height<=1080]+ba/b[height<=1080]/bv*+ba/b", "-S", "res:1080,vcodec:h264,ext:mp4:m4a",
                   "--merge-output-format", "mp4", "--ffmpeg-location", str(Path(ffmpeg).resolve().parent),
+                  "--write-subs", "--write-auto-subs", "--sub-langs", f"{pref}.*-orig,ru,en,-live_chat",
+                  "--sub-format", "vtt/srt/best", "--convert-subs", "vtt",
                   "-o", str(dest / "%(title).60B [%(id)s].%(ext)s"),
                   "--print-to-file", "%(id)s", str(id_file),
                   "--print-to-file", "after_move:filepath", str(path_file),
                   "--", url]
 
 
-def download_video(url: str, tools: "Tools", progress: Progress, override: Optional[str] = None) -> Path:
+def download_video(url: str, tools: "Tools", progress: Progress, override: Optional[str] = None,
+                   language: Optional[str] = None) -> Path:
     """A URL on the command line (YouTube, Vimeo, a direct link — whatever yt-dlp knows): download it
     once into <Videos>/video2llm/downloads and go on as with a local file. A video downloaded before is
     found by its id and not fetched again."""
@@ -888,7 +989,10 @@ def download_video(url: str, tools: "Tools", progress: Progress, override: Optio
                 if pct != last[0]:
                     last[0] = pct
                     progress("download", pct)
-        r = run(yt_dlp_args(exe, url, dest, tools.ffmpeg, id_file, path_file), on_line)
+        try:
+            r = run(yt_dlp_args(exe, url, dest, tools.ffmpeg, id_file, path_file, language), on_line)
+        except OSError as e:   # a broken shebang, a venv moved elsewhere, no permission
+            sys.exit(f"yt-dlp could not be run ({' '.join(exe)}): {e}")
         vid = id_file.read_text(encoding="utf-8").strip().splitlines()[-1] if id_file.exists() and id_file.read_text(encoding="utf-8").strip() else ""
         got = path_file.read_text(encoding="utf-8").strip().splitlines()[-1] if path_file.exists() and path_file.read_text(encoding="utf-8").strip() else ""
     file = Path(got) if got and Path(got).is_file() else None
@@ -1071,7 +1175,7 @@ def dense_span(p: Dict[str, Any], start: float, end: Optional[float]) -> Dict[st
 
 
 def prepare(source: Path, out_dir: Path, tools: Tools, names: Dict[str, str], *, frames_mode: str,
-            span: Optional[List[Optional[float]]] = None, transcript: bool,
+            span: Optional[List[Optional[float]]] = None, transcript: bool, force_whisper: bool = False,
             sounds: bool, sound_threshold: float, native: bool, whisper_model: str, language: Optional[str],
             progress: Progress, sounds_model: Optional[str] = None, voice_rescue: bool = False,
             overview_fps: int = FRAME_FPS) -> Dict[str, Any]:
@@ -1167,6 +1271,15 @@ def prepare(source: Path, out_dir: Path, tools: Tools, names: Dict[str, str], *,
     tr_meta: Dict[str, Any] = m.get("transcript_meta") or {}
     sound_spans: List[Dict[str, Any]] = m.get("sound_spans") or []
     want_tr = transcript and p["has_audio"] and segs is None
+    if want_tr and not force_whisper:
+        cap = captions_beside(source, language if language != "auto" else None)
+        if cap is not None:
+            segs = cap["segments"]
+            tr_meta = {"language": cap["language"], "language_source": "captions", "gate": "captions",
+                       "source": "captions", "file": cap["file"].name}
+            (out_dir / "transcript.txt").write_text("\n".join(seg_line(x) for x in segs) + "\n", encoding="utf-8")
+            progress("transcript", 100, f"{len(segs)} segments from {cap['file'].name} (the site's captions, no Whisper)")
+            want_tr = False
     if want_tr:
         import importlib.util
         if importlib.util.find_spec("faster_whisper") is None:  # say so before extracting audio for nothing
@@ -1405,6 +1518,9 @@ def lane_blocks(m: Dict[str, Any], label: str, start: float, max_frames: Optiona
                    "the moments they were asked for" if spans else "; only speech is transcribed — other sounds are not listed")
     if not p["has_audio"]:
         audio_note = "no audio"
+    elif m.get("transcript") is not None and (m.get("transcript_meta") or {}).get("source") == "captions":
+        audio_note = ("with audio (the words are the site's own captions — automatic ones can mishear, read them with the frames"
+                      + ("" if m.get("transcript") else ": the caption file is empty") + sounds_note + ")")
     elif m.get("transcript") is not None:
         audio_note = ("with audio (automatic speech transcript — it can mishear words, read it with the frames"
                       + ("" if m.get("transcript") else ": no words were recognised") + sounds_note + ")")
@@ -2331,7 +2447,7 @@ def main(argv: Optional[List[str]] = None) -> None:
                                         "  video2llm clip.mp4 --format anthropic --prompt \"What goes wrong at 0:05?\"\n"
                                         "  video2llm clip.mp4 --native --format gemini   # the video itself, fitted to 19 MB\n"
                                         "  video2llm clip.mp4 --start 0:30          # the next 30 frames of a long video\n"
-                                        "  video2llm https://youtu.be/…              # a video by URL (yt-dlp), then the same\n"
+                                        "  video2llm https://youtu.be/…              # a video by URL (yt-dlp): its captions stand in for Whisper\n"
                                         "  ANTHROPIC_API_KEY=… video2llm clip.mp4 --format anthropic --ask \"Describe the camera moves\"\n")
     ap.add_argument("video", help="video file (mp4, mov, m4v, webm, mpeg, avi, 3gp …) or a URL (YouTube, Vimeo, a direct link — "
                                   "anything yt-dlp knows; downloaded once into <Videos>/video2llm/downloads, up to 1080p)")
@@ -2377,6 +2493,9 @@ def main(argv: Optional[List[str]] = None) -> None:
     g.add_argument("--ask", metavar="QUESTION", help="send the lane to the API (provider from --format, key from env) and print the answer")
     g = ap.add_argument_group("speech and sounds")
     g.add_argument("--no-transcript", action="store_true", help="skip faster-whisper (the words)")
+    g.add_argument("--force-whisper", action="store_true",
+                   help="transcribe with Whisper even when a subtitle file sits beside the video (<name>.<lang>.vtt / .srt — "
+                        "a site's captions downloaded with the URL, or your own); by default such a file stands in for Whisper")
     g.add_argument("--sounds", action="store_true",
                    help="sounds other than speech (music, laughter, a slam, a crowd …) for the --start…--end moment "
                         "(the whole video without them), by the PANNs AudioSet model; off by default — only speech. "
@@ -2399,6 +2518,9 @@ def main(argv: Optional[List[str]] = None) -> None:
                    help="the lane is for an agent harness that runs this script itself: the header tells the model to call "
                         "the tool NAME with {video, what: next | frames | sounds, start, end} instead of giving it commands")
     g.add_argument("--ffmpeg", help="path to ffmpeg"); g.add_argument("--ffprobe", help="path to ffprobe")
+    g.add_argument("--download-only", action="store_true",
+                   help="with a URL: download the video and its captions, print the file's path to stdout and stop (for a program "
+                        "that runs the rest itself)")
     g.add_argument("--yt-dlp", help="yt-dlp for a video URL: a path or a command line (\"py -m yt_dlp\"); default: the one on PATH "
                                     "or the yt_dlp module of this Python")
     g.add_argument("--quiet", action="store_true")
@@ -2418,8 +2540,13 @@ def main(argv: Optional[List[str]] = None) -> None:
     progress = make_progress(a.quiet)
     if URL_RE.match(a.video.strip()):
         log(f"video2llm {VERSION} — {a.video.strip()}")
-        source = download_video(a.video.strip(), tools, progress, a.yt_dlp).resolve()
+        source = download_video(a.video.strip(), tools, progress, a.yt_dlp, a.language).resolve()
+        if a.download_only:
+            print(str(source), flush=True)
+            return
     else:
+        if a.download_only:
+            sys.exit("--download-only needs a URL")
         source = Path(a.video).expanduser().resolve()
     try:
         with open(source, "rb"):
@@ -2455,6 +2582,7 @@ def main(argv: Optional[List[str]] = None) -> None:
             "--out <local folder> keeps them on this computer")
     names = NAMES[a.names]
     m = prepare(source, out_dir, tools, names, frames_mode=a.frames, span=[start, end], transcript=not a.no_transcript,
+                force_whisper=a.force_whisper,
                 sounds=a.sounds, sound_threshold=a.sound_threshold, native=a.native, whisper_model=a.whisper_model,
                 language=a.language, progress=progress, sounds_model=a.sounds_model, voice_rescue=a.voice_rescue,
                 overview_fps=a.fps)

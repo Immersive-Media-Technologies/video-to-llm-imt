@@ -370,6 +370,10 @@ if dest.exists():      # yt-dlp skips a file it downloaded before and the after_
     print("[download] " + str(dest) + " has already been downloaded")
     sys.exit(0)
 shutil.copy(os.environ["VIDEO2LLM_TEST_CLIP"], dest)
+if "--write-subs" in args:   # the site's captions beside the file, as yt-dlp writes them
+    (out / "Title [abc123].en-orig.vtt").write_text(
+        "WEBVTT\\n\\n00:00:00.500 --> 00:00:02.000\\nhello from the captions\\n\\n00:00:03.000 --> 00:00:05.000\\nsecond line\\n",
+        encoding="utf-8")
 print("[download]  50.0% of 1.00MiB")
 print("[download] 100.0% of 1.00MiB")
 prints["after_move:filepath"].write_text(str(dest) + "\\n", encoding="utf-8")
@@ -389,11 +393,17 @@ def test_a_url_is_downloaded_with_yt_dlp_then_treated_as_a_file(clip, tmp_path):
     env["VIDEO2LLM_TEST_CLIP"] = str(clip)
     env["VIDEO2LLM_DOWNLOADS"] = str(tmp_path / "downloads")   # this test's folder, not the user's Videos
     out = tmp_path / "lane"
-    r = run("https://example.com/watch?v=abc123", "--no-transcript", "--out", out, env=env)
+    r = run("https://example.com/watch?v=abc123", "--out", out, env=env)   # no --no-transcript: the captions stand in
     assert "[download] 100%" in r.stderr
+    assert "the site's captions, no Whisper" in r.stderr and "faster-whisper" not in r.stderr
     head = (out / "lane.md").read_text(encoding="utf-8")
     assert 'video "Title [abc123].mp4"' in head
+    assert "the site's own captions" in head and "hello from the captions" in head and "second line" in head
     assert "Title [abc123].mp4" in head.split("run ")[1]   # the rerun command names the downloaded file, not the URL
+    assert "--write-subs" in video2llm.yt_dlp_args(["x"], "u", tmp_path, FFMPEG, tmp_path / "i", tmp_path / "p")
+    # --download-only: the path on stdout, nothing else written
+    r3 = run("https://example.com/watch?v=abc123", "--download-only", "--quiet", env=env)
+    assert r3.stdout.strip().endswith("Title [abc123].mp4") and Path(r3.stdout.strip()).is_file()
     # the same URL again: yt-dlp reports the file as downloaded already and video2llm finds it by its id
     r2 = run("https://example.com/watch?v=abc123", "--no-transcript", "--out", out, env=env)
     assert "[download] 100%" in r2.stderr and "Title [abc123].mp4" in r2.stderr and (out / "lane.md").exists()
@@ -422,3 +432,51 @@ def test_agent_tool_header_names_the_frame_files(clip):
     run(clip, "--no-transcript", "--agent-tool", "video")
     head = (frames_dir(clip) / "lane.md").read_text(encoding="utf-8")
     assert "frames_1fps_768px" in head and "/mm-ss.jpg" in head and "only when the user asks for that frame as a file" in head
+
+
+YOUTUBE_ROLLING_VTT = """WEBVTT
+Kind: captions
+Language: en
+
+00:00:00.160 --> 00:00:02.390 align:start position:0%
+ 
+so<00:00:00.640><c> today</c><00:00:00.880><c> we</c><00:00:01.199><c> look</c>
+
+00:00:02.390 --> 00:00:02.400 align:start position:0%
+so today we look
+ 
+
+00:00:02.400 --> 00:00:04.549 align:start position:0%
+so today we look
+at<00:00:02.720><c> the</c><00:00:03.040><c> fence</c>
+
+00:00:04.549 --> 00:00:04.559 align:start position:0%
+at the fence
+ 
+
+00:00:04.559 --> 00:00:06.000 align:start position:0%
+at the fence
+and<00:00:05.000><c> laugh</c>
+"""
+
+
+def test_youtube_rolling_captions_come_out_once_each():
+    segs = video2llm.parse_captions(YOUTUBE_ROLLING_VTT)
+    assert [s["text"] for s in segs] == ["so today we look", "at the fence", "and laugh"]
+    assert segs[0]["start"] == pytest.approx(0.16) and segs[1]["start"] == pytest.approx(2.4)
+    assert segs[0]["end"] >= 2.0   # a span up to the next line, not the 10 ms of a rolling cue
+    srt = "1\n00:00:01,000 --> 00:00:02,000\nPrivet\n\n2\n00:00:02,500 --> 00:00:03,000\nDanya!\n"
+    assert [(s["start"], s["text"]) for s in video2llm.parse_captions(srt)] == [(1.0, "Privet"), (2.5, "Danya!")]
+
+
+def test_a_subtitle_file_beside_the_video_stands_in_for_whisper(clip, tmp_path):
+    v = tmp_path / "with subs.mp4"
+    shutil.copy(clip, v)
+    (tmp_path / "with subs.ru.srt").write_text("1\n00:00:01,000 --> 00:00:02,500\nПривет, Даня!\n", encoding="utf-8")
+    (tmp_path / "with subs.en.srt").write_text("1\n00:00:01,000 --> 00:00:02,500\nHi Danya!\n", encoding="utf-8")
+    r = run(v)   # transcript on, no Whisper: the file beside the video is used — ru before en
+    assert "the site's captions, no Whisper" in r.stderr
+    head = (v.with_name("with subs_frames") / "lane.md").read_text(encoding="utf-8")
+    assert "Привет, Даня!" in head and "Hi Danya!" not in head and "site's own captions" in head
+    r2 = run(v, "--language", "en", "--out", tmp_path / "en_lane")   # --language picks the file
+    assert "Hi Danya!" in (tmp_path / "en_lane" / "lane.md").read_text(encoding="utf-8")

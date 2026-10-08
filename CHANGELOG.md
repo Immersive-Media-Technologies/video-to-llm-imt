@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.5.0] — 2026-10-08
+
+- **The site's captions stand in for Whisper.** With a URL, yt-dlp also saves the subtitles beside the file
+  (`<name>.<lang>.vtt`: manual ones in the asked language / ru / en, and the automatic track in the original
+  language — `*-orig`); the lane takes them instead of running Whisper — nothing to transcribe, and the words
+  are the site's own. YouTube's rolling automatic captions (every cue repeating the previous line) come out
+  once each, at the time a line first appears. The same for **any `.vtt` / `.srt` beside a local video**
+  (`clip.ru.srt`, `clip.srt`): it is used; `--language` picks the file; `--force-whisper` ignores them.
+  The header says the words are captions.
+- **`--download-only`** — with a URL: download the video and its captions, print the file's path and stop
+  (for a program that runs the rest itself — Deep Artisan).
+- yt-dlp: exact subtitle codes instead of patterns (`ru.*` also matched translated tracks and a dozen requests
+  got a 429), `--ignore-errors` so a failed subtitle does not take the video down; a yt-dlp that cannot be run
+  (a moved venv) is reported in one line.
+
 ## [0.4.1] — 2026-10-08
 
 - `--yt-dlp` / `VIDEO2LLM_YT_DLP` also take a command line (`"py -m yt_dlp"`, a venv's Python with the module).

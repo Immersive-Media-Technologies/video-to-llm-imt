@@ -291,11 +291,11 @@ python3 video2llm.py clip.mp4 --fps 3                                # a denser 
 python3 video2llm.py clip.mp4 --agent-tool video                     # for a harness with its own tool: the header says "call video with {…}"
 python3 video2llm.py clip.mp4 --sheet-frames 6                       # six frames to a sheet (scaled to fit) — half the files for a chat that counts them
 python3 video2llm.py clip.mp4 --native --format gemini               # the video itself, fitted into 19 MB
-python3 video2llm.py https://youtu.be/…                              # a video by URL (yt-dlp): downloaded once, then the same
+python3 video2llm.py https://youtu.be/…                              # a video by URL (yt-dlp): its captions stand in for Whisper
 ```
 
 ```
-video2llm 0.4.1 — IMG_2056.MOV
+video2llm 0.5.0 — IMG_2056.MOV
   [probe] 100% — 720×1280, 02:29, 30.00 fps, audio
   frames: 1 per second over the whole video, 768px on the long side — frame by frame for a moment: --frames all --start mm:ss --end mm:ss (up to 4.0 s)
   [frames] 100% — 149 frames at 1/s
@@ -400,6 +400,11 @@ run them).
   (`VIDEO2LLM_DOWNLOADS` moves it), and the lane goes next to that file; the same URL again is not fetched twice. yt-dlp is the only thing to
   install for that (`pip install yt-dlp`, `brew install yt-dlp`, `winget install yt-dlp`); a playlist URL takes
   its one video. Private or DRM-protected videos are not downloaded.
+- **The site's captions instead of Whisper:** with a URL, the subtitles are saved beside the file (manual ones in
+  your `--language` / ru / en, and the automatic track in the original language) and the lane uses them — no
+  transcription at all, and the words are the site's own. Any `.vtt` / `.srt` beside a local video is used the
+  same way (`clip.ru.srt`, `clip.srt`); `--force-whisper` ignores them. The header tells the model the words
+  are captions.
 - 150 overview frames (2½ minutes, 50 sheets, ≈ 67,000 Claude tokens) per lane; a longer video comes in
   parts, and the model fetches the next one itself with `--start` — the header names the price of a part.
   A 10-minute video watched whole is four parts, ≈ 270,000 tokens: the overview at 768 px is the deliberate
@@ -450,6 +455,8 @@ Notices for the models and tools it downloads: [THIRD-PARTY-NOTICES.md](THIRD-PA
 
 Every version is on the [Releases](../../releases) page.
 
+- v0.5.0 — the site's captions (and any `.vtt` / `.srt` beside a video) stand in for Whisper; `--download-only`
+  for a program that runs the rest itself.
 - v0.4.1 — `--yt-dlp` takes a command line too; the Windows test of the download path.
 - v0.4.0 — a video by URL (YouTube, Vimeo, direct links — yt-dlp, optional): downloaded once up to 1080p into the
   Videos folder, then everything as for a local file; with `--agent-tool` the header names the frame files so an
