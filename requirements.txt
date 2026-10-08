@@ -1,0 +1,5 @@
+faster-whisper>=1.1   # speech; also brings ONNX Runtime + numpy for the sounds on request.
+pillow>=10            # contact sheets: lane.md shows 3 frames to an image (without it: one per frame); --format sheets.
+fpdf2>=2.7            # optional: --format pdf (brings fontTools).
+# ffmpeg/ffprobe are system packages (brew / winget / apt). No PyTorch needed.
+# Models are downloaded by the script itself, once, from this project's release "models-v1".

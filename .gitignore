@@ -1,0 +1,6 @@
+.ship/
+__pycache__/
+.pytest_cache/
+*_frames/
+.DS_Store
+.env

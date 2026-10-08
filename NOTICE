@@ -1,0 +1,10 @@
+V2L-IMT by Immersive Media Technologies — https://github.com/Immersive-Media-Technologies
+
+Licensed under the IMT Non-Commercial License (CC BY-NC 4.0 with attribution terms, see LICENSE):
+non-commercial use only; every use, copy, fork or derived product must credit
+«V2L-IMT by Immersive Media Technologies — https://github.com/Immersive-Media-Technologies»
+visibly to its users; commercial use by written permission only.
+
+The video pipeline of Deep Artisan (Immersive Media Technologies), released as a standalone tool.
+The models in this project's release "models-v1" are redistributed under their own licenses
+(MIT for Whisper, CC BY 4.0 for PANNs) — see THIRD-PARTY-NOTICES.md.
