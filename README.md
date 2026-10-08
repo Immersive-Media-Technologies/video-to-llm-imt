@@ -253,7 +253,6 @@ with where you put the script. Chats need nothing installed — only the right f
 | **Claude Code**, as a skill | put `agents/SKILL.md` and `video2llm.py` into `~/.claude/skills/video2llm/` — found whenever a video comes up, no path to edit |
 | **Claude Cowork** | the same two files in a folder `video2llm`, zipped, at *Customize → Skills* in the Claude app — or say the line below in the chat; keep the video inside the folder you connected |
 | **Claude** app / claude.ai (chat) | nothing to install: `python3 video2llm.py clip.mp4 --format pdf`, attach `lane.pdf` |
-| **Deep Artisan** | nothing to install: attach the video — the app runs this script itself, puts the sheets into the model's message (`lane.json`) and executes the model's `video` requests (`--agent-tool`); the chip's toggle turns 1 a second into 2–4 (`--fps`); on the Anthropic subscription channel six frames to a sheet (`--sheet-frames 6`) |
 | **Cursor** | `agents/.cursor/rules/video2llm.mdc` into the project's `.cursor/rules/` (Cursor reads `AGENTS.md` in the project root too) |
 | **Codex CLI** | `agents/AGENTS.md` into the project root, or `~/.codex/AGENTS.md` |
 | **Antigravity** | `agents/AGENTS.md` into the project root, or `~/.gemini/AGENTS.md` |
