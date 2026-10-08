@@ -98,12 +98,57 @@ def test_a_short_lane_names_the_next_part_and_the_model_fetches_it(clip):
     run(clip, "--no-transcript")                                     # the whole lane again for the tests below
 
 
+def test_a_denser_overview_adds_frames_to_the_same_folder(clip):
+    """--fps 4: the frames between the seconds join the 1 a second frames in the same folder as mm-ss.cc.jpg;
+    a 1 a second run afterwards reads only the whole seconds and cuts nothing again."""
+    out = frames_dir(clip)
+    folder = out / "frames_1fps_768px"
+    run(clip, "--no-transcript", "--fps", "4")
+    names = sorted(p.name for p in folder.glob("*.jpg"))
+    assert "00-01.25.jpg" in names and "00-01.50.jpg" in names and "00-01.75.jpg" in names and "00-01.jpg" in names
+    assert len(names) == 24
+    lane = (out / "lane.md").read_text(encoding="utf-8")
+    head = lane.split("\n\n")[0]
+    assert "shown at 4 frames per second" in head and "[00:12.25]" not in head
+    assert "(the frames between two seconds: [mm:ss.cc])" in head
+    assert "--fps 4" in head                                       # the follow-up commands keep the density
+    assert "[00:01.25]" in lane and "sheet_00-00_00-00.50.jpg" in lane
+    m = json.loads((out / "video2llm.json").read_text(encoding="utf-8"))
+    assert m["overview_fps"] == 4 and len(m["frames"]) == 24
+    before = {p.name: p.stat().st_mtime for p in folder.glob("*.jpg")}
+    run(clip, "--no-transcript")                                     # back to 1 a second: nothing is cut again
+    assert {p.name: p.stat().st_mtime for p in folder.glob("*.jpg")} == before
+    lane = (out / "lane.md").read_text(encoding="utf-8")
+    assert "shown at 1 frame per second" in lane and "[00:01.25]" not in lane
+    assert sum(1 for ln in lane.splitlines() if ln.startswith("![")) == 2
+
+
+def test_lane_json_mirrors_lane_md_for_a_program(clip):
+    out = frames_dir(clip)
+    j = json.loads((out / "lane.json").read_text(encoding="utf-8"))
+    assert j["lane"] == "lane.md" and j["blocks"][0]["role"] == "head"
+    imgs = [b for b in j["blocks"] if b["type"] == "image"]
+    assert [b["frames"] for b in imgs] == [["00:00", "00:01", "00:02"], ["00:03", "00:04", "00:05"]]
+    assert all(b["sheet"] and Path(b["path"]).is_file() for b in imgs)
+
+
+def test_agent_tool_header_calls_the_tool_instead_of_commands(clip):
+    out = frames_dir(clip)
+    run(clip, "--no-transcript", "--agent-tool", "video", "--max-frames", "3")
+    head = (out / "lane.md").read_text(encoding="utf-8").split("\n\n")[0]
+    assert '"what": "frames", "start": "00:12", "end": "00:14"' in head and "call video with" in head
+    assert '"what": "next", "start": "00:03"' in head
+    assert "python" not in head.lower() and "--frames all" not in head
+    assert "Use only the video tool" in head and "If the video tool is not available" in head
+    run(clip, "--no-transcript")                                     # the whole lane again for the tests below
+
+
 def test_words_and_sounds_sit_under_the_sheet_of_their_frame(clip):
     m = json.loads((frames_dir(clip) / "video2llm.json").read_text(encoding="utf-8"))
     m["transcript"] = [{"start": 1.4, "end": 2.6, "text": " hello "}]
     m["sound_spans"] = [{"start": 3.0, "end": 5.0, "threshold": 0.15, "note": "",
                          "events": [{"start": 4.2, "end": 4.9, "label": "Laughter"}]}]
-    blocks = video2llm.agent_sheets(video2llm.lane_blocks(m, "Video 1", 0.0, None, False, rerun="RUN", per_sheet=3), [3, 1])
+    blocks = video2llm.agent_sheets(video2llm.lane_blocks(m, "Video 1", 0.0, None, False, rerun=video2llm.Rerun("RUN", clip), per_sheet=3), [3, 1])
     texts = [b["text"] for b in blocks if b["type"] == "text"]
     assert "(sound: …) for 00:03–00:05 only" in texts[0]
     assert "[00:01] → «hello» (speech 00:01.4–00:02.6)" in texts
@@ -119,7 +164,7 @@ def test_sound_lane_shows_every_frame_where_the_sound_happens(clip):
                          "events": [{"start": 2.0, "end": 2.5, "label": "Slam"}]}]
     tools = video2llm.Tools(video2llm.find_tool("ffmpeg", None), video2llm.find_tool("ffprobe", None))
     r = video2llm.sound_check(m, tools, out, video2llm.NAMES["en"], "Video 1", 1.0, 4.0, 0.15,
-                              video2llm.make_progress(True), rerun="RUN")
+                              video2llm.make_progress(True), rerun=video2llm.Rerun("RUN", clip))
     assert r["moments"] == 1 and r["frames"] == 34                  # 1.7–2.8 s: the slam ± 0.3 s, every frame
     lane = r["path"].read_text(encoding="utf-8")
     assert r["path"].name == "lane_sounds_00-01_00-03.md"

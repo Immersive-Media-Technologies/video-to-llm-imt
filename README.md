@@ -109,6 +109,16 @@ their own (in an earlier round, before the rules, two of them did).
 
 ## In detail
 
+- **A denser overview.** `--fps 2`, `3` or `4` adds the frames between the seconds to the same folder
+  (`[00:12.25]`, `[00:12.50]`, `[00:12.75]` between `[00:12]` and `[00:13]`), at that many times the tokens of
+  the 1 a second lane; the 1 a second lane keeps reading only the whole seconds, nothing is cut twice. The
+  frame-by-frame and sound requests work the same in either density. A whole 200k context holds about 1:18
+  of video at 4 a second, 1:44 at 3, 2:36 at 2, 5:12 at 1 (768 px frames, ≈ 448 tokens each for Claude).
+- **For a program, not an agent.** Every `lane*.md` has a `lane*.json` twin — the same header, sheets and lines
+  as data (image paths, the tags on each sheet, the lines under it) — for an app that puts the images into the
+  model's message itself; `--agent-tool NAME` makes the header ask the model to call that tool
+  (`{"video", "what": "next" | "frames" | "sounds", "start", "end"}`) instead of giving it commands.
+  This is how Deep Artisan uses the script.
 - **Anchors and frame numbers.** A frame-by-frame request is anchored on two overview frames by their tags,
   both included. The overview frame `[00:12]` is the first frame at or after 12.000 s, and the
   frame-by-frame lane tags that same frame `[00:12.00 #360]` — time and the frame's number in the video,
@@ -238,6 +248,7 @@ nothing installed — only the right format to attach.
 | **Claude Code**, as a skill | put `agents/SKILL.md` and `video2llm.py` into `~/.claude/skills/video2llm/` — found whenever a video comes up, no path to edit |
 | **Claude Cowork** | the same two files in a folder `video2llm`, zipped, at *Customize → Skills* in the Claude app — or say the line below in the chat; keep the video inside the folder you connected |
 | **Claude** app / claude.ai (chat) | nothing to install: `python3 video2llm.py clip.mp4 --format pdf`, attach `lane.pdf` |
+| **Deep Artisan** | nothing to install: attach the video — the app runs this script itself, puts the sheets into the model's message (`lane.json`) and executes the model's `video` requests (`--agent-tool`); the chip's toggle turns 1 a second into 2–4 (`--fps`) |
 | **Cursor** | `agents/.cursor/rules/video2llm.mdc` into the project's `.cursor/rules/` |
 | **Codex CLI** | `agents/AGENTS.md` into the project root, or `~/.codex/AGENTS.md` |
 | **Antigravity** | `agents/AGENTS.md` into the project root, or `~/.gemini/AGENTS.md` |
@@ -271,11 +282,13 @@ python3 video2llm.py clip.mp4 --format sheets                        # contact s
 python3 video2llm.py clip.mp4 --format anthropic --ask "What goes wrong at 0:05?"   # key from ANTHROPIC_API_KEY
 python3 video2llm.py long.mp4 --start 2:30                           # the next part of a long video → lane_from_02-30.md
 python3 video2llm.py clip.mp4 --single-frames                        # lane.md with one image per frame
+python3 video2llm.py clip.mp4 --fps 3                                # a denser overview: 3 frames a second, added to the same folder
+python3 video2llm.py clip.mp4 --agent-tool video                     # for a harness with its own tool: the header says "call video with {…}"
 python3 video2llm.py clip.mp4 --native --format gemini               # the video itself, fitted into 19 MB
 ```
 
 ```
-video2llm 0.1.0 — IMG_2056.MOV
+video2llm 0.2.0 — IMG_2056.MOV
   [probe] 100% — 720×1280, 02:29, 30.00 fps, audio
   frames: 1 per second over the whole video, 768px on the long side — frame by frame for a moment: --frames all --start mm:ss --end mm:ss (up to 4.0 s)
   [frames] 100% — 149 frames at 1/s
@@ -426,5 +439,8 @@ Notices for the models and tools it downloads: [THIRD-PARTY-NOTICES.md](THIRD-PA
 
 Every version is on the [Releases](../../releases) page.
 
+- v0.2.0 — a denser overview on request (`--fps 2 | 3 | 4`, the frames join the same folder), `lane.json`
+  beside every `lane.md` for a program that builds the model's message itself, `--agent-tool NAME` for a
+  harness with its own tool (how Deep Artisan runs the script).
 - v0.1.0 — first public version: overview + frame-by-frame on request with anchors and cost, sounds on
   request, lane.md / PDF / contact sheets / API bodies, models in this repository's release `models-v1`.

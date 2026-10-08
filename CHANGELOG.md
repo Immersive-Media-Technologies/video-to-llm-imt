@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.2.0] — 2026-10-08
+
+- **A denser overview on request** — `--fps 2 | 3 | 4`: the frames between the seconds join the same folder
+  (`[00:12.25]`), the 1 a second lane keeps reading only the whole seconds; the cost scales with the density.
+- **lane.json beside every lane.md** — the lane as data (image paths, the tags of each sheet's frames, the
+  lines under it) for a program that puts the images into the model's message itself.
+- **`--agent-tool NAME`** — the header asks the model to call that tool (`{video, what, start, end}`) instead
+  of giving it commands: for an agent harness that runs the script itself (Deep Artisan).
+- The cost of the next part in the header follows the density; a rerun keeps `--fps` and `--max-frames`;
+  stale `lane*.json` files are cleaned up with the `.md` ones.
+
 ## [0.1.0] — 2026-10-07
 
 First public version.

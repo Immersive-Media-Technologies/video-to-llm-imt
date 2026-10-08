@@ -68,13 +68,14 @@ import zipfile
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
-VERSION = "0.1.0"
+VERSION = "0.2.0"
 
 # ── constants (same numbers as the Deep Artisan pipeline) ────────────────────────────────────────
 NATIVE_LIMIT_BYTES = 19 * 1024 * 1024  # Gemini request limit 20 MB minus headroom
 AUDIO_KBPS = 64
 FRAME_WIDTH = 768   # overview frames fit in 768×768 (long side 768): ≈448 Claude tokens in either orientation
 FRAME_FPS = 1
+OVERVIEW_FPS_MAX = 4  # --fps: a denser overview (2–4 a second) adds frames to the same folder, [00:12.25] between [00:12] and [00:13]
 DENSE_MAX_FRAMES = 120  # frame-by-frame: every frame of up to 120/fps s per request (4 s at 30 fps), one message
 DENSE_MAX_FPS = 100.0   # frame names carry 1/100 s
 DENSE_WIDTH = 512   # frame-by-frame frames fit in 512×512
@@ -245,6 +246,27 @@ def span_tag(a: float, b: float, names: Dict[str, str]) -> str:
 # take the frame nearest to 12.5 s.)
 OVERVIEW_SELECT = "select='isnan(prev_selected_t)+gte(floor(t),floor(prev_selected_t)+1)'"
 OVERVIEW_CUT = 2  # manifest marker: caches cut the older way (fps=1) are redone
+
+
+def overview_select(fps: int) -> str:
+    """The overview at `fps` a second: for every 1/fps s the first frame at or after it — [00:12.25] is the frame
+    at 12.250 s. At 1 a second this is OVERVIEW_SELECT."""
+    if fps <= 1:
+        return OVERVIEW_SELECT
+    return f"select='isnan(prev_selected_t)+gte(floor(t*{fps}),floor(prev_selected_t*{fps})+1)'"
+
+
+def tcode_frac(sec: float) -> str:
+    """mm:ss for a whole second, mm:ss.cc for a frame between two seconds (a 2–4 a second overview)."""
+    cc = int(round((sec % 1) * 100))
+    return tcode(sec) if cc == 0 or cc == 100 else f"{tcode(math.floor(sec))}.{cc:02d}"
+
+
+def overview_frames_at(frames: List[Dict[str, Any]], fps: int) -> List[Dict[str, Any]]:
+    """The frames of the folder that belong to an overview at `fps` a second (the folder may hold a denser cut)."""
+    if fps <= 1:
+        return [f for f in frames if abs(f["t"] - round(f["t"])) < 1e-6]
+    return [f for f in frames if abs(f["t"] * fps - round(f["t"] * fps)) < 1e-6]
 
 
 def fit_filter(size: int) -> str:
@@ -850,7 +872,7 @@ def stale_cleanup(out_dir: Path) -> None:
     own = {"audio.wav", "audio-32k.wav", "work-1080p.mp4", "transcript.txt", "sounds.txt"}
     for f in out_dir.iterdir():
         try:
-            if f.is_file() and (f.name in own or re.fullmatch(r"lane([ _][^/\\]+)?(-\d\d)?\.(md|pdf)|payload\.\w+([ _][^/\\]+)?\.json"
+            if f.is_file() and (f.name in own or re.fullmatch(r"lane([ _][^/\\]+)?(-\d\d)?\.(md|pdf|json)|payload\.\w+([ _][^/\\]+)?\.json"
                                                              r"|sounds([ _][^/\\]+)?\.txt|audio-32k([ _][^/\\]+)?\.wav", f.name)):
                 f.unlink()
             elif f.is_dir() and re.fullmatch(r"sheets([ _].+)?", f.name):
@@ -885,7 +907,9 @@ def rename_sequence(folder: Path, fps: float, dense: bool, offset: float = 0.0) 
     for f in sorted(folder.glob("[0-9][0-9][0-9][0-9][0-9][0-9].jpg")):
         idx = int(f.stem) - 1
         t = offset + idx / fps
-        name = f"{fmt_t(math.floor(t))}.{int(round((t % 1) * 100)):02d}.jpg" if dense else f"{fmt_t(t)}.jpg"
+        cc = int(round((t % 1) * 100)) % 100
+        # a denser overview (2–4 a second) names the frames between two seconds mm-ss.cc, the whole seconds as before
+        name = f"{fmt_t(math.floor(t))}.{cc:02d}.jpg" if (dense or cc) else f"{fmt_t(t)}.jpg"
         target = folder / name
         if target.exists():
             target.unlink()
@@ -965,7 +989,8 @@ def dense_span(p: Dict[str, Any], start: float, end: Optional[float]) -> Dict[st
 def prepare(source: Path, out_dir: Path, tools: Tools, names: Dict[str, str], *, frames_mode: str,
             span: Optional[List[Optional[float]]] = None, transcript: bool,
             sounds: bool, sound_threshold: float, native: bool, whisper_model: str, language: Optional[str],
-            progress: Progress, sounds_model: Optional[str] = None, voice_rescue: bool = False) -> Dict[str, Any]:
+            progress: Progress, sounds_model: Optional[str] = None, voice_rescue: bool = False,
+            overview_fps: int = FRAME_FPS) -> Dict[str, Any]:
     out_dir.mkdir(parents=True, exist_ok=True)
     manifest_path = out_dir / MANIFEST_NAME
     mtime = source.stat().st_mtime
@@ -994,7 +1019,7 @@ def prepare(source: Path, out_dir: Path, tools: Tools, names: Dict[str, str], *,
         log(f"  frames: frame by frame — every frame from {tcode(sp['start'])} to {tcode(sp['end'])}, both included, "
             f"at {rate} per second" + ("" if sp["every"] else f" (of {p['fps']:.0f})") + f", {DENSE_WIDTH}px on the long side")
     else:
-        log(f"  frames: 1 per second over the whole video, {FRAME_WIDTH}px on the long side — frame by frame for a moment: "
+        log(f"  frames: {overview_fps} per second over the whole video, {FRAME_WIDTH}px on the long side — frame by frame for a moment: "
             f"--frames all --start mm:ss --end mm:ss (up to {frame_rate_limits(p)['max_span']:.1f} s)")
 
     # 3) work copy — only above 1080p by the short side
@@ -1007,19 +1032,26 @@ def prepare(source: Path, out_dir: Path, tools: Tools, names: Dict[str, str], *,
                               "-c:a", "aac", "-b:a", f"{AUDIO_KBPS}k", "-movflags", "+faststart", str(work)], dur, "work copy", progress)
         progress("work copy", 100, "1080p")
 
+    cut_fps = int(m.get("overview_fps") or FRAME_FPS)  # how dense the folder's overview already is
     if frames_mode != "all":
-        # the 1 fps lane, 768 px, names = timecodes
+        # the overview lane, 768 px, names = timecodes; --fps 2–4 adds the frames between the seconds to the same
+        # folder (mm-ss.cc.jpg) — the 1 a second lane keeps reading only the whole seconds
         sparse_dir.mkdir(exist_ok=True)
-        if (len(frames) < math.floor(dur) or not lane_ok(frames, p, FRAME_WIDTH)
+        whole = overview_frames_at(frames, FRAME_FPS)
+        if (len(whole) < math.floor(dur) or not lane_ok(frames, p, FRAME_WIDTH)
                 or m.get("overview_cut") != OVERVIEW_CUT):
             for old in sparse_dir.glob("*.jpg"):
                 if frame_time_from_name(old.name) is not None:
                     old.unlink()
-            tools.ffmpeg_run(["-i", str(work), "-vf", f"{OVERVIEW_SELECT},{fit_filter(FRAME_WIDTH)}", *tools.vfr(),
+            frames, cut_fps = [], FRAME_FPS
+        want_fps = max(overview_fps, cut_fps if frames else FRAME_FPS)
+        if not frames or (overview_fps > cut_fps):
+            tools.ffmpeg_run(["-i", str(work), "-vf", f"{overview_select(want_fps)},{fit_filter(FRAME_WIDTH)}", *tools.vfr(),
                               "-q:v", "4", str(sparse_dir / "%06d.jpg")], dur, "frames", progress)
-            rename_sequence(sparse_dir, FRAME_FPS, dense=False)
+            rename_sequence(sparse_dir, want_fps, dense=False)  # whole seconds are rewritten with the same frames
             frames = list_frames(sparse_dir)
-        progress("frames", 100, f"{len(frames)} frames at 1/s")
+            cut_fps = want_fps
+        progress("frames", 100, f"{len(overview_frames_at(frames, overview_fps))} frames at {overview_fps}/s")
     else:
         # every frame of the span, 512 px; its own folder per span (the whole video keeps Deep Artisan's name)
         rate = f"{sp['fps']:.1f}".rstrip("0").rstrip(".")
@@ -1146,7 +1178,7 @@ def prepare(source: Path, out_dir: Path, tools: Tools, names: Dict[str, str], *,
     m = {
         "tool": "video2llm", "version": VERSION, "created_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
         "source": str(source), "source_mtime": mtime, "dir": str(out_dir), "probe": p, "work": str(work),
-        "frames": frames, "overview_cut": OVERVIEW_CUT if frames else m.get("overview_cut"), "dense": dense,
+        "frames": frames, "overview_cut": OVERVIEW_CUT if frames else m.get("overview_cut"), "overview_fps": cut_fps, "dense": dense,
         "transcript": segs, "transcript_meta": tr_meta, "sound_spans": sound_spans,
         "native": native_parts, "native_plan": plan,
     }
@@ -1210,30 +1242,73 @@ def fit_dims(w: float, h: float, size: int) -> List[float]:
     return [w * k, h * k]
 
 
+class Rerun:
+    """How the model asks for more of this video. By default a shell command — this script with the same
+    settings (`cmd`); with --agent-tool NAME the header tells an agent harness that runs the script itself
+    (Deep Artisan) to call that tool: {"video": …, "what": "next" | "frames" | "sounds", "start", "end"}."""
+
+    def __init__(self, cmd: str, video: Path, tool: Optional[str] = None):
+        self.cmd, self.video, self.tool = cmd, video, tool
+
+    def _call(self, what: str, start: str, end: Optional[str] = None) -> str:
+        args = {"video": str(self.video), "what": what, "start": start}
+        if end is not None:
+            args["end"] = end
+        return f"call {self.tool} with {json.dumps(args, ensure_ascii=False)}"
+
+    def frames(self, start: str = "mm:ss", end: str = "mm:ss") -> str:
+        return self._call("frames", start, end) if self.tool else f"run {self.cmd} --frames all --start {start} --end {end}"
+
+    def sounds(self, start: str = "mm:ss", end: str = "mm:ss") -> str:
+        return self._call("sounds", start, end) if self.tool else f"run {self.cmd} --sounds --start {start} --end {end}"
+
+    def next(self, at: float) -> str:
+        return self._call("next", tcode(at)) if self.tool else f"run {self.cmd} --start {tcode(at)}"
+
+    def next_file(self, at: float) -> str:
+        """"it writes lane_from_mm-ss.md, " for the command; the tool returns the lane itself."""
+        return "" if self.tool else f"it writes lane_from_{fmt_t(at)}.md, "
+
+    def writes(self, name: str) -> str:
+        return "" if self.tool else f"it writes {name}; "
+
+    def these(self) -> str:
+        return f"the {self.tool} tool" if self.tool else "these commands"
+
+    def cannot(self) -> str:
+        return (f"If the {self.tool} tool is not available to you, tell the user which request you need." if self.tool else
+                "If you cannot run commands, give the user the command and ask for what it writes.")
+
+    def cannot_next(self, more_txt: str) -> str:
+        return (f"if the tool is not available, ask the user to send {more_txt}." if self.tool else
+                f"if you cannot run commands, ask the user to send {more_txt}.")
+
+
 def lane_blocks(m: Dict[str, Any], label: str, start: float, max_frames: Optional[int], dense: bool,
                 end: Optional[float] = None, kind: str = "message", part: Optional[Dict[str, Any]] = None,
-                rerun: Optional[str] = None, per_sheet: int = 0) -> List[Dict[str, Any]]:
+                rerun: Optional["Rerun"] = None, per_sheet: int = 0, fps_overview: int = FRAME_FPS) -> List[Dict[str, Any]]:
     """Header + frames interleaved with the words spoken around each frame; the rest of the
     transcript as text at the end (cheap — the model knows all the speech). `kind` says what the
     header describes: "message" (images in a request or lane.md), "pdf" (pages; part = {index, parts, files})
     or "sheets" (contact sheets; part = {first, last, total, batch, batches}). `per_sheet` > 1: lane.md shows
-    the frames that many to an image (agent_sheets) and the header says so. The header is a short list of
-    rules: the model picks the moments itself, fetches the rest of the overview itself, asks the user only
-    yes or no with the cost before a frame-by-frame or sound request, and uses no other tool on the video."""
+    the frames that many to an image (agent_sheets) and the header says so. `fps_overview` 2–4: the denser
+    overview (--fps). The header is a short list of rules: the model picks the moments itself, fetches the rest
+    of the overview itself, asks the user only yes or no with the cost before a frame-by-frame or sound request,
+    and uses no other tool on the video."""
     p = m["probe"]
     dur = p["duration"]
     d = m.get("dense") if dense else None
     use_dense = bool(d and d.get("frames"))
-    lane = d["frames"] if use_dense else (m.get("frames") or [])
-    fps = d["fps"] if use_dense else FRAME_FPS
+    lane = d["frames"] if use_dense else overview_frames_at(m.get("frames") or [], fps_overview)
+    fps = d["fps"] if use_dense else fps_overview
     width = d["width"] if use_dense else FRAME_WIDTH
     limit = max_frames or (DENSE_MAX_FRAMES + 1 if use_dense else SPARSE_PER_MESSAGE)  # +1: both anchors are included
     win = [f for f in lane if f["t"] >= start - 1e-6 and (end is None or f["t"] <= end + 1e-6)][:limit]  # --end is included
     to_sec = (win[-1]["t"] + 1 / fps) if win else start
 
     def tag(t: float) -> str:
-        if fps <= 1:
-            return tcode(t)
+        if not use_dense:
+            return tcode_frac(t)  # [00:12], and [00:12.25] between two seconds in a denser overview
         # hundredths are rounded; the frame number in the video (counted from 0) is exact
         return f"{tcode(math.floor(t))}.{int(round((t % 1) * 100)):02d} #{int(round(t * (p.get('fps') or fps)))}"
 
@@ -1260,7 +1335,8 @@ def lane_blocks(m: Dict[str, Any], label: str, start: float, max_frames: Optiona
     example = per_dense * (int(round(2 * lim["fps"])) + 1)  # [00:12]–[00:14], both anchors included
     cap = per_dense * (DENSE_MAX_FRAMES + 1)
     tok = (lambda n: f"{n:,} tokens") if per_dense else (lambda n: "N tokens")
-    tag_form = "[mm:ss.cc #frame] (#n = the frame's number in the video, counted from 0)" if fps > 1 else "[mm:ss]"
+    tag_form = ("[mm:ss.cc #frame] (#n = the frame's number in the video, counted from 0)" if use_dense else
+                "[mm:ss] (the frames between two seconds: [mm:ss.cc])" if fps > 1 else "[mm:ss]")
 
     # ── what the images are ──
     if kind == "pdf":
@@ -1283,6 +1359,7 @@ def lane_blocks(m: Dict[str, Any], label: str, start: float, max_frames: Optiona
                 "as one moving picture, not as separate photos. The words and sounds of each frame follow it.")
 
     rules: List[str] = []
+    fps_txt = "1 frame per second" if fps_overview <= 1 else f"{fps_overview} frames per second"
     if use_dense:
         view += (f" This is frame by frame: every frame from the overview frame [{tcode(d['start'])}] to [{tcode(d['end'])}], "
                  f"both included — {len(lane)} frames at {fps:.2f}".rstrip("0").rstrip(".") + " per second"
@@ -1290,13 +1367,12 @@ def lane_blocks(m: Dict[str, Any], label: str, start: float, max_frames: Optiona
                  f"[{tag(d['start'])}] is the same frame as the overview frame [{tcode(d['start'])}]"
                  + (f"; these frames ≈ {per_dense * len(win):,} image tokens by Anthropic's formula for Claude" if per_dense else "")
                  + ".")
-        rules.append("Look at fine motion, flicker and the changes from frame to frame. The whole video at 1 frame per second "
+        rules.append(f"Look at fine motion, flicker and the changes from frame to frame. The whole video at {fps_txt} "
                      "is the overview lane (lane.md).")
         rules.append("Another moment frame by frame, or the sounds of a moment: you choose it, then ask the user — yes or no "
                      f"with the cost (a second frame by frame ≈ {tok(per_sec)}; sounds come with every frame where they happen, "
                      f"up to ≈ {tok(cap)})"
-                     + (f"; after the yes, run {rerun} --frames all --start mm:ss --end mm:ss (up to {max_span} s) or {rerun} "
-                        "--sounds --start mm:ss --end mm:ss" if rerun else
+                     + (f"; after the yes, {rerun.frames()} (up to {max_span} s) or {rerun.sounds()}" if rerun else
                         "; after the yes, the user runs video2llm with --frames all (or --sounds) --start mm:ss --end mm:ss")
                      + ". Ask before every such request.")
     else:
@@ -1312,21 +1388,23 @@ def lane_blocks(m: Dict[str, Any], label: str, start: float, max_frames: Optiona
                         "the next messages)")
         else:
             unit, more_here, more_txt = "This lane", False, ""
-        r1 = ("The video is shown at 1 frame per second — the normal view, enough for what happens and who says what. "
+        r1 = (f"The video is shown at {fps_txt} — the normal view, enough for what happens and who says what. "
               f"{unit} carries {tcode(start)}–{tcode(min(to_sec, dur))}.")
         tail = to_sec < dur and tcode(to_sec) != tcode(dur)
-        nxt_cost = (f" (≈ {over * min(LANE_MD_FRAMES, int(math.ceil(dur - to_sec))):,} tokens a part)" if over and tail else "")
+        nxt_cost = (f", ≈ {over * min(LANE_MD_FRAMES, int(math.ceil((dur - to_sec) * fps_overview))):,} tokens a part"
+                    if over and tail else "")
+        nxt_file = rerun.next_file(to_sec) if rerun else ""
         if tail:
             if more_here:
                 r1 += (f" The rest ({tcode(to_sec)}–{tcode(dur)}) is not here. When your answer concerns it (a question about "
                        "the whole video does), "
-                       + (f"get it yourself first, without asking the user — run {rerun} --start {tcode(to_sec)} (it writes "
-                          f"lane_from_{fmt_t(to_sec)}.md, the next part{nxt_cost}; repeat until the end); if you cannot run commands, "
-                          f"ask the user to send {more_txt}." if rerun else f"ask the user to send {more_txt}."))
+                       + (f"get it yourself first, without asking the user — {rerun.next(to_sec)} ({nxt_file}the next part"
+                          f"{nxt_cost}; repeat until the end); {rerun.cannot_next(more_txt)}" if rerun
+                          else f"ask the user to send {more_txt}."))
             elif rerun:
                 r1 += (f" Frames {tcode(to_sec)}–{tcode(dur)} are not here: when your answer concerns them (a question about "
-                       f"the whole video does), get them yourself first, without asking the user — run {rerun} --start "
-                       f"{tcode(to_sec)} (it writes lane_from_{fmt_t(to_sec)}.md, the next part{nxt_cost}; repeat until the end).")
+                       f"the whole video does), get them yourself first, without asking the user — {rerun.next(to_sec)} "
+                       f"({nxt_file}the next part{nxt_cost}; repeat until the end).")
             else:
                 r1 += (f" Frames {tcode(to_sec)}–{tcode(dur)} are not here: when your answer concerns them, ask the user for "
                        f"the next part (from {tcode(to_sec)}).")
@@ -1335,13 +1413,13 @@ def lane_blocks(m: Dict[str, Any], label: str, start: float, max_frames: Optiona
         rules.append(r1)
         rules.append("You choose the moments, by what you see and hear in the lane — the user does not know the timecodes. "
                      "Ask the user only for a yes or a no, with the cost.")
-        rules.append("Frame by frame — when one frame per second cannot answer (something happens between two frames: fast "
+        rules.append(f"Frame by frame — when {fps_txt} cannot answer (something happens between two frames: fast "
                      "motion, a gesture, a flicker, a cut), do not guess; ask, e.g. \"To answer this I need every frame from "
                      f"[00:12] to [00:14] — about {tok(example)}. Shall I?\" The anchors are two overview frames by their tags, "
                      f"both included (00:12.5 narrows it); one request covers up to {max_span} s (~{DENSE_MAX_FRAMES} frames at "
                      f"{lim['fps']:.0f} per second), a longer moment goes in consecutive pieces. "
-                     + (f"After the yes, run {rerun} --frames all --start 00:12 --end 00:14 — it writes lane_00-12_00-14.md; "
-                        "look at its images." if rerun else
+                     + (f"After the yes, {rerun.frames('00:12', '00:14')} — {rerun.writes('lane_00-12_00-14.md')}look at its images."
+                        if rerun else
                         "After the yes, the user runs video2llm with --frames all --start 00:12 --end 00:14 and sends you what "
                         "it writes."))
         if p["has_audio"]:
@@ -1350,9 +1428,9 @@ def lane_blocks(m: Dict[str, Any], label: str, start: float, max_frames: Optiona
                          f"frames where they happen — up to about {tok(cap)}. Shall I?\" One sound request may cover any span, a "
                          f"whole minute too (it covers the whole second of the last anchor); the {max_span} s limit is only on the "
                          "frames that come with it — they are taken where a sound is found. "
-                         + (f"After the yes, run {rerun} --sounds --start 00:40 --end 00:44 — it prints the tags and writes "
-                            "lane_sounds_00-40_00-44.md with every frame where each sound happens: look at them to see what "
-                            "makes it." if rerun else
+                         + (f"After the yes, {rerun.sounds('00:40', '00:44')} — it gives the tags and "
+                            f"{rerun.writes('lane_sounds_00-40_00-44.md')}every frame where each sound happens: look at them to "
+                            "see what makes it." if rerun else
                             "After the yes, the user runs video2llm with --sounds --start 00:40 --end 00:44 and sends you what "
                             "it writes.")
                          + " If nothing besides speech is found, tell the user that no other sounds could be identified there "
@@ -1361,18 +1439,18 @@ def lane_blocks(m: Dict[str, Any], label: str, start: float, max_frames: Optiona
                      "too, and also when the user's question is itself about a sound or an exact moment: the yes is for the "
                      "tokens. The rest of the overview (rule 1) needs no yes.")
     if rerun:
-        rules.append("Use only these commands for this video. Do not search for or open the video file, do not run ffmpeg, "
+        rules.append(f"Use only {rerun.these()} for this video. Do not search for or open the video file, do not run ffmpeg, "
                      "ffprobe or any other tool on it, do not read video2llm.json, and do not crop, zoom or combine frames "
                      "yourself — open only the images the lanes link to. If a detail is too small to tell, say so.")
-        rules.append("If you cannot run commands, give the user the command and ask for what it writes.")
+        rules.append(rerun.cannot())
     else:
         rules.append("Do not cut frames from the video or analyse its sound some other way.")
     cost = ""
     if over and not use_dense:
         cost = (f"\nCost, by Anthropic's formula for Claude (other models count differently; the exact figure comes only with "
                 f"the response): an overview frame ≈ {over:,} tokens, a frame-by-frame one ≈ {per_dense:,} ({DENSE_WIDTH}px on "
-                f"the long side), a second frame by frame ≈ {per_sec:,} — {per_sec / max(1, over):.0f}× the same second in "
-                f"the overview; the frames here ≈ {over * len(win):,}.")
+                f"the long side), a second frame by frame ≈ {per_sec:,} — {per_sec / max(1, over * fps_overview):.0f}× the same "
+                f"second in the overview; the frames here ≈ {over * len(win):,}.")
     if kind == "pdf":
         close = ("\nThe whole transcript and sound list is here too, before and after the frames. If you can read only the text "
                  "of this PDF and not the frames (some chat apps pass PDFs as text only), say so instead of guessing what is "
@@ -1447,7 +1525,7 @@ def cut_every_frame(tools: "Tools", work: Path, out_dir: Path, names: Dict[str, 
 
 
 def sound_check(m: Dict[str, Any], tools: "Tools", out_dir: Path, names: Dict[str, str], label: str, s0: float,
-                s1: float, threshold: float, progress: Progress, rerun: Optional[str] = None,
+                s1: float, threshold: float, progress: Progress, rerun: Optional["Rerun"] = None,
                 sheets: bool = True) -> Optional[Dict[str, Any]]:
     """A sound request answered with its source in view: the tags of the moment and every frame where each sound
     happens (events ± 0.3 s, up to one request's worth of frames), speech lines in place — lane_sounds_a_b.md."""
@@ -1488,10 +1566,9 @@ def sound_check(m: Dict[str, Any], tools: "Tools", out_dir: Path, names: Dict[st
     tag_form = "[mm:ss.cc #frame] (#n = the frame's number in the video, counted from 0)"
     other = ("Another moment frame by frame, or the sounds of another moment: you choose it, then ask the user — yes or no "
              f"with the cost (a second frame by frame ≈ {per * round(fps):,} tokens)"
-             + (f"; after the yes, run {rerun} --frames all --start mm:ss --end mm:ss (up to {lim['max_span']:.1f} s) or "
-                f"{rerun} --sounds --start mm:ss --end mm:ss" if rerun else "")
+             + (f"; after the yes, {rerun.frames()} (up to {lim['max_span']:.1f} s) or {rerun.sounds()}" if rerun else "")
              + ". Ask before every such request.")
-    only = ("Use only these commands for this video. Do not search for or open the video file, do not run ffmpeg, ffprobe "
+    only = (f"Use only {rerun.these()} for this video. Do not search for or open the video file, do not run ffmpeg, ffprobe "
             "or any other tool on it or on its sound, and do not crop, zoom or combine frames yourself — open only the "
             "images this lane links to." if rerun else "Do not cut frames or analyse the sound some other way.")
     if cuts:
@@ -1508,7 +1585,7 @@ def sound_check(m: Dict[str, Any], tools: "Tools", out_dir: Path, names: Dict[st
                    + " (over one request) — ask for them separately" if skipped else "") + ". " + (span.get("note") or "")
                 + "\nRules:\n1. Say what makes each sound only from what the frames show; when they do not show it, say so."
                 f"\n2. {other}\n3. {only}"
-                + ("\n4. If you cannot run commands, give the user the command and ask for what it writes." if rerun else "")
+                + (f"\n4. {rerun.cannot()}" if rerun else "")
                 + "]")
     else:
         head = (f"[{label}: video \"{Path(m['source']).name}\" — sound check of {tcode(s0)}–{tcode(s1)}: "
@@ -1654,6 +1731,9 @@ def agent_sheets(blocks: List[Dict[str, Any]], grid: List[int]) -> List[Dict[str
 
 
 def write_markdown(blocks: List[Dict[str, Any]], prompt: str, path: Path) -> None:
+    """lane.md for an agent, and the same lane as lane.json for a program (Deep Artisan) that puts the images
+    into the model's message itself: text blocks with their role, image blocks with the file, the tags of the
+    frames on it and the lines that belong under it."""
     lines = []
     for b in blocks:
         if b["type"] == "text":
@@ -1668,6 +1748,17 @@ def write_markdown(blocks: List[Dict[str, Any]], prompt: str, path: Path) -> Non
     if prompt:
         lines.append(prompt)
     path.write_text("\n\n".join(lines) + "\n", encoding="utf-8")
+    plain = []
+    for b in blocks:
+        if b["type"] == "text":
+            plain.append({"type": "text", "role": b.get("role") or "text", "text": b["text"]})
+        elif b["type"] == "image":
+            plain.append({"type": "image", "path": b["path"], "t": b.get("t"), "tag": b.get("tag") or tcode(b["t"]),
+                          "frames": b.get("frames") or [b.get("tag") or tcode(b["t"])], "sheet": bool(b.get("sheet"))})
+        else:
+            plain.append({"type": "video", "path": b["path"]})
+    path.with_suffix(".json").write_text(json.dumps({"tool": "video2llm", "version": VERSION, "lane": path.name,
+                                                     "blocks": plain}, ensure_ascii=False, indent=1), encoding="utf-8")
 
 
 def to_openai(blocks: List[Dict[str, Any]], prompt: str, model: str) -> Dict[str, Any]:
@@ -1891,7 +1982,7 @@ class _PdfLane:
 
 def write_pdf(m: Dict[str, Any], label: str, start: float, end: Optional[float], max_frames: Optional[int], dense: bool,
               prompt: str, out_dir: Path, font: Optional[str], max_pages: int = PDF_MAX_PAGES,
-              base: str = "lane", rerun: Optional[str] = None) -> List[Dict[str, Any]]:
+              base: str = "lane", rerun: Optional["Rerun"] = None, fps_overview: int = FRAME_FPS) -> List[Dict[str, Any]]:
     """The lane from `start` to the end (or `max_frames`) as lane.pdf, or lane-01.pdf … when it does
     not fit one file. Needs fpdf2 (pip install fpdf2); without it the PDF is skipped."""
     try:
@@ -1907,7 +1998,7 @@ def write_pdf(m: Dict[str, Any], label: str, start: float, end: Optional[float],
     if not fonts["regular"]:
         log("  pdf: skipped — no TrueType font with Cyrillic found; pass --pdf-font /path/to/font.ttf")
         return []
-    full = lane_blocks(m, label, start, max_frames or 10 ** 9, dense, end=end, kind="pdf",
+    full = lane_blocks(m, label, start, max_frames or 10 ** 9, dense, end=end, kind="pdf", fps_overview=fps_overview,
                        part={"index": 0, "parts": 2, "files": ["lane-01.pdf", "lane-02.pdf"]}, rerun=rerun)
     cells = [b for b in full if b["type"] == "image"]
     if not cells:
@@ -1940,7 +2031,7 @@ def write_pdf(m: Dict[str, Any], label: str, start: float, end: Optional[float],
     lang = (m.get("transcript_meta") or {}).get("language")
     out = []
     for i, part in enumerate(parts):
-        blocks = lane_blocks(m, label, part[0]["t"], len(part), dense, end=end, kind="pdf",
+        blocks = lane_blocks(m, label, part[0]["t"], len(part), dense, end=end, kind="pdf", fps_overview=fps_overview,
                              part={"index": i, "parts": n, "files": files}, rerun=rerun)
         path = out_dir / files[i]
         title = f"video2llm — {Path(m['source']).name}" + (f" (part {i + 1} of {n})" if n > 1 else "")
@@ -1989,7 +2080,7 @@ def _clear_sheets(folder: Path) -> None:
 
 def write_sheets(m: Dict[str, Any], label: str, start: float, end: Optional[float], max_frames: Optional[int], dense: bool,
                  prompt: str, out_dir: Path, font: Optional[str], grid: Optional[str], per_message: int,
-                 folder_name: str = "sheets", rerun: Optional[str] = None) -> Optional[Dict[str, Any]]:
+                 folder_name: str = "sheets", rerun: Optional["Rerun"] = None, fps_overview: int = FRAME_FPS) -> Optional[Dict[str, Any]]:
     """sheets/sheet-01.jpg … — frames on a grid, each with its [mm:ss] above it and the sheet's number and
     time span along the top — plus "about this video.txt" (header + the whole transcript and sounds).
     More sheets than one message takes → sheets/message-01/, message-02/ …, each with its own text file."""
@@ -1998,7 +2089,7 @@ def write_sheets(m: Dict[str, Any], label: str, start: float, end: Optional[floa
     except ImportError:
         log("  sheets: skipped — needs Pillow (pip install pillow; fpdf2 brings it)")
         return None
-    full = lane_blocks(m, label, start, max_frames or 10 ** 9, dense, end=end)
+    full = lane_blocks(m, label, start, max_frames or 10 ** 9, dense, end=end, fps_overview=fps_overview)
     cells = [b for b in full if b["type"] == "image"]
     if not cells:
         log("  sheets: skipped — no frames in the window")
@@ -2055,7 +2146,7 @@ def write_sheets(m: Dict[str, Any], label: str, start: float, end: Optional[floa
         first, last = batch[0], batch[-1]
         b_start = sheets[first][0]["t"]
         b_count = sum(len(sheets[k]) for k in batch)
-        head = lane_blocks(m, label, b_start, b_count, dense, end=end, kind="sheets",
+        head = lane_blocks(m, label, b_start, b_count, dense, end=end, kind="sheets", fps_overview=fps_overview,
                            part={"first": first + 1, "last": last + 1, "total": total, "batch": bi + 1, "batches": len(batches)},
                            rerun=rerun)[0]["text"]
         lines = [x[1] for x in timeline_items(m)]
@@ -2114,6 +2205,9 @@ def main(argv: Optional[List[str]] = None) -> None:
                         f"glitches, fast motion); up to {DENSE_MAX_FRAMES} frames per request (4 s at 30 fps, 2 s at 60), "
                         "never thinned — a longer span is refused with the pieces to ask for")
     g.add_argument("--all-frames", action="store_true", help=argparse.SUPPRESS)  # old name of --frames all
+    g.add_argument("--fps", type=int, default=FRAME_FPS, choices=range(1, OVERVIEW_FPS_MAX + 1), metavar="N",
+                   help=f"a denser overview, 2–{OVERVIEW_FPS_MAX} frames a second (default 1): the frames between the seconds are "
+                        "added to the same folder as [mm:ss.cc]; costs that many times the tokens of the 1 a second lane")
     g.add_argument("--start", default="0:00", help="the first frame, mm:ss or h:mm:ss, may have a fraction: 0:12.5 (default 0:00)")
     g.add_argument("--end", help="the last frame, included (default: the end of the video)")
     g.add_argument("--max-frames", type=int,
@@ -2160,6 +2254,9 @@ def main(argv: Optional[List[str]] = None) -> None:
     g = ap.add_argument_group("other")
     g.add_argument("--out", help="output folder (default: <video>_frames next to the video)")
     g.add_argument("--names", choices=["en", "ru"], default="en", help="language of the folder names (ru = as in Deep Artisan)")
+    g.add_argument("--agent-tool", metavar="NAME",
+                   help="the lane is for an agent harness that runs this script itself: the header tells the model to call "
+                        "the tool NAME with {video, what: next | frames | sounds, start, end} instead of giving it commands")
     g.add_argument("--ffmpeg", help="path to ffmpeg"); g.add_argument("--ffprobe", help="path to ffprobe")
     g.add_argument("--quiet", action="store_true")
     g.add_argument("--version", action="version",
@@ -2212,10 +2309,11 @@ def main(argv: Optional[List[str]] = None) -> None:
     progress = make_progress(a.quiet)
     m = prepare(source, out_dir, tools, names, frames_mode=a.frames, span=[start, end], transcript=not a.no_transcript,
                 sounds=a.sounds, sound_threshold=a.sound_threshold, native=a.native, whisper_model=a.whisper_model,
-                language=a.language, progress=progress, sounds_model=a.sounds_model, voice_rescue=a.voice_rescue)
+                language=a.language, progress=progress, sounds_model=a.sounds_model, voice_rescue=a.voice_rescue,
+                overview_fps=a.fps)
 
     dense = a.frames == "all"
-    blocks = lane_blocks(m, a.label, start, a.max_frames, dense, end=end)
+    blocks = lane_blocks(m, a.label, start, a.max_frames, dense, end=end, fps_overview=a.fps)
     # frame-by-frame output is written beside the overview, never over it: lane.md stays the 1 fps lane
     d = m.get("dense") or {}
     if dense:
@@ -2225,16 +2323,18 @@ def main(argv: Optional[List[str]] = None) -> None:
             f" from {fmt_t(start)}" if names is NAMES["ru"] else f"_from_{fmt_t(start)}")
     else:
         suffix = ""
-    rerun = (("& " if os.name == "nt" else "")  # PowerShell runs a quoted path only with the call operator
-             + f"{shell_arg(sys.executable)} {shell_arg(Path(__file__).resolve())} {shell_arg(source)}"
-             + (f" --out {shell_arg(out_dir)}" if a.out else "")
-             # the settings that shape the files: a follow-up run without them would cut into other folders
-             + (f" --names {a.names}" if a.names != "en" else "") + (" --single-frames" if a.single_frames else "")
-             + (f" --language {a.language}" if a.language != "auto" else "")
-             + (f" --whisper-model {shell_arg(a.whisper_model)}" if a.whisper_model != "small" else "")
-             + (f" --sound-threshold {a.sound_threshold:g}" if a.sound_threshold != 0.15 else "")
-             + (f" --ffmpeg {shell_arg(a.ffmpeg)}" if a.ffmpeg else "") + (f" --ffprobe {shell_arg(a.ffprobe)}" if a.ffprobe else "")
-             + (f" --sounds-model {shell_arg(a.sounds_model)}" if a.sounds_model else ""))
+    cmd = (("& " if os.name == "nt" else "")  # PowerShell runs a quoted path only with the call operator
+           + f"{shell_arg(sys.executable)} {shell_arg(Path(__file__).resolve())} {shell_arg(source)}"
+           + (f" --out {shell_arg(out_dir)}" if a.out else "")
+           # the settings that shape the files: a follow-up run without them would cut into other folders
+           + (f" --names {a.names}" if a.names != "en" else "") + (" --single-frames" if a.single_frames else "")
+           + (f" --fps {a.fps}" if a.fps != FRAME_FPS else "") + (f" --max-frames {a.max_frames}" if a.max_frames else "")
+           + (f" --language {a.language}" if a.language != "auto" else "")
+           + (f" --whisper-model {shell_arg(a.whisper_model)}" if a.whisper_model != "small" else "")
+           + (f" --sound-threshold {a.sound_threshold:g}" if a.sound_threshold != 0.15 else "")
+           + (f" --ffmpeg {shell_arg(a.ffmpeg)}" if a.ffmpeg else "") + (f" --ffprobe {shell_arg(a.ffprobe)}" if a.ffprobe else "")
+           + (f" --sounds-model {shell_arg(a.sounds_model)}" if a.sounds_model else ""))
+    rerun = Rerun(cmd, source, a.agent_tool)
     # a sound request alone (--sounds without --frames all / --format) only prints and saves the tags
     formats = set(a.format or ([] if a.sounds and not dense else ["md"]))
     if "all" in formats:
@@ -2248,7 +2348,7 @@ def main(argv: Optional[List[str]] = None) -> None:
     if "md" in formats:
         grid = lane_sheet_plan(m, dense, enabled=not a.single_frames)
         md_blocks = lane_blocks(m, a.label, start, a.max_frames or (None if dense else LANE_MD_FRAMES), dense, end=end,
-                                rerun=rerun, per_sheet=grid[0] * grid[1])
+                                rerun=rerun, per_sheet=grid[0] * grid[1], fps_overview=a.fps)
         md_blocks = agent_sheets(md_blocks, grid)
         path = out_dir / f"lane{suffix}.md"; write_markdown(md_blocks, prompt, path); written.append(path)
     payloads: Dict[str, Dict[str, Any]] = {}
@@ -2278,11 +2378,11 @@ def main(argv: Optional[List[str]] = None) -> None:
         log(f"  wrote {w}")
     if "pdf" in formats:
         for r in write_pdf(m, a.label, start, end, a.max_frames, dense, prompt, out_dir,
-                           a.pdf_font, max(1, a.pdf_pages), base=f"lane{suffix}", rerun=rerun):
+                           a.pdf_font, max(1, a.pdf_pages), base=f"lane{suffix}", rerun=rerun, fps_overview=a.fps):
             log(f"  wrote {r['path']} — {r['span']}, {r['frames']} frames, {r['pages']} pages, {r['bytes'] / 1e6:.1f} MB")
     if "sheets" in formats:
         r = write_sheets(m, a.label, start, end, a.max_frames, dense, prompt, out_dir, a.pdf_font, a.sheet_grid,
-                         a.sheets_per_message, folder_name=f"sheets{suffix}", rerun=rerun)
+                         a.sheets_per_message, folder_name=f"sheets{suffix}", rerun=rerun, fps_overview=a.fps)
         if r:
             log(f"  wrote {r['dir']}{os.sep} — {r['frames']} frames on {r['sheets']} sheet(s), {r['grid']}"
                 + (f", in {r['batches']} message folders (message-01 …): attach one folder's files per message"
