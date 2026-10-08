@@ -68,7 +68,7 @@ import zipfile
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
-VERSION = "0.5.1"
+VERSION = "0.6.0"
 
 # ── constants (same numbers as the Deep Artisan pipeline) ────────────────────────────────────────
 NATIVE_LIMIT_BYTES = 19 * 1024 * 1024  # Gemini request limit 20 MB minus headroom
@@ -79,6 +79,8 @@ OVERVIEW_FPS_MAX = 4  # --fps: a denser overview (2–4 a second) adds frames to
 DENSE_MAX_FRAMES = 120  # frame-by-frame: every frame of up to 120/fps s per request (4 s at 30 fps), one message
 DENSE_MAX_FPS = 100.0   # frame names carry 1/100 s
 DENSE_WIDTH = 512   # frame-by-frame frames fit in 512×512
+AT_WIDTH = 1024     # single frames asked for by time (a slide, an interface, text on screen): readable, ≈ 800 Claude tokens
+AT_MAX = 40         # moments per --frames at request
 SPARSE_PER_MESSAGE = 30  # frames of the 1 fps lane per message (API request bodies)
 LANE_MD_FRAMES = 150     # frames of the 1 fps lane per lane.md: 2½ minutes, 50 sheets — an agent opens them one by one
                          # anyway, so a longer lane only saves it the extra runs; a longer video comes in parts
@@ -90,6 +92,7 @@ NAMES = {
     "en": {
         "sparse": "frames_1fps_{w}px",
         "dense": "frames_all{span}_{fps}fps_{w}px",
+        "at": "frames_at_{w}px",
         "native": "native",
         "work": "work-1080p.mp4",
         "audio": "audio.wav",
@@ -97,6 +100,7 @@ NAMES = {
     "ru": {
         "sparse": "кадры 1 в сек ({w}px)",
         "dense": "все кадры{span} ({fps} в сек, {w}px)",
+        "at": "кадры по запросу ({w}px)",
         "native": "native",
         "work": "work-1080p.mp4",
         "audio": "audio.wav",
@@ -1250,6 +1254,10 @@ def prepare(source: Path, out_dir: Path, tools: Tools, names: Dict[str, str], *,
         rate = f"{sp['fps']:.2f}".rstrip("0").rstrip(".")
         log(f"  frames: frame by frame — every frame from {tcode(sp['start'])} to {tcode(sp['end'])}, both included, "
             f"at {rate} per second" + ("" if sp["every"] else f" (of {p['fps']:.0f})") + f", {DENSE_WIDTH}px on the long side")
+    elif frames_mode == "none":
+        log("  frames: none — a lecture lane: the transcript, and single frames on request (--frames at --times mm:ss,…)")
+    elif frames_mode == "at":
+        log(f"  frames: single frames at the moments asked for, {AT_WIDTH}px on the long side")
     else:
         log(f"  frames: {overview_fps} per second over the whole video, {FRAME_WIDTH}px on the long side — frame by frame for a moment: "
             f"--frames all --start mm:ss --end mm:ss (up to {frame_rate_limits(p)['max_span']:.1f} s)")
@@ -1265,7 +1273,9 @@ def prepare(source: Path, out_dir: Path, tools: Tools, names: Dict[str, str], *,
         progress("work copy", 100, "1080p")
 
     cut_fps = int(m.get("overview_fps") or FRAME_FPS)  # how dense the folder's overview already is
-    if frames_mode != "all":
+    if frames_mode in ("none", "at"):
+        pass  # no overview: a lecture lane (the transcript) or single frames by time — cut after prepare()
+    elif frames_mode != "all":
         # the overview lane, 768 px, names = timecodes; --fps 2–4 adds the frames between the seconds to the same
         # folder (mm-ss.cc.jpg) — the 1 a second lane keeps reading only the whole seconds
         sparse_dir.mkdir(exist_ok=True)
@@ -1506,6 +1516,13 @@ class Rerun:
     def next(self, at: float) -> str:
         return self._call("next", tcode(at)) if self.tool else f"run {self.cmd} --start {tcode(at)}"
 
+    def at(self, times: Optional[List[str]] = None) -> str:
+        """Single frames at the moments named: {what: "at", times: [...]} for the tool, --frames at --times for the command."""
+        ts = times or ["mm:ss", "mm:ss"]
+        if self.tool:
+            return f"call {self.tool} with " + json.dumps({"video": str(self.video), "what": "at", "times": ts}, ensure_ascii=False)
+        return f"run {self.cmd} --frames at --times {','.join(ts)}"
+
     def next_file(self, at: float) -> str:
         """"it writes lane_from_mm-ss.md, " for the command; the tool returns the lane itself."""
         return "" if self.tool else f"it writes lane_from_{fmt_t(at)}.md, "
@@ -1700,6 +1717,9 @@ def lane_blocks(m: Dict[str, Any], label: str, start: float, max_frames: Optiona
                      + (f" The overview frames themselves are the files {shell_arg(Path(lane[0]['file']).parent)}/mm-ss.jpg "
                         f"({FRAME_WIDTH}px) — read one from there only when the user asks for that frame as a file."
                         if rerun.tool and lane and not use_dense else "")
+                     + (f" For a slide, an interface or text on screen at a few exact moments, single larger frames "
+                        f"({AT_WIDTH}px) are cheaper than frame by frame: {rerun.at(['03:12', '07:40'])} — up to 6 without asking, "
+                        "more with the cost." if not use_dense else "")
                      + " If a detail is too small to tell, say so.")
         rules.append(rerun.cannot())
     else:
@@ -1873,6 +1893,143 @@ def sound_check(m: Dict[str, Any], tools: "Tools", out_dir: Path, names: Dict[st
     path = out_dir / f"lane_sounds{span_tag(s0, s1 - 1.0 / FRAME_FPS if s1 - s0 >= 1 else s1, names)}.md"
     write_markdown(out, "", path)
     return {"path": path, "moments": len(cuts), "frames": n_frames, "tokens": per * n_frames, "skipped": skipped}
+
+
+# ── single frames by time, and the lecture lane (user decision 08.10.2026) ────────────────────────────
+def cut_frames_at(tools: "Tools", work: Path, out_dir: Path, names: Dict[str, str], times: List[float],
+                  progress: Progress) -> List[Dict[str, Any]]:
+    """One frame at each moment, AT_WIDTH on the long side, in <out>/frames_at_1024px/mm-ss.cc.jpg — cut once."""
+    folder = out_dir / names["at"].format(w=AT_WIDTH)
+    folder.mkdir(exist_ok=True)
+    out: List[Dict[str, Any]] = []
+    for i, t in enumerate(times):
+        f = folder / f"{fmt_t(math.floor(t))}.{int(round((t % 1) * 100)):02d}.jpg"
+        if not f.exists():
+            r = run([tools.ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-ss", f"{t:.3f}", "-i", str(work),
+                     "-frames:v", "1", "-vf", fit_filter(AT_WIDTH), "-q:v", "3", str(f)])
+            if r.returncode != 0 or not f.exists():
+                log(f"  frame at {tcode(t)}: ffmpeg failed — {(r.stderr or '').strip().splitlines()[-1:] or ''}")
+                continue
+        out.append({"t": t, "file": str(f)})
+        progress("frames at", int((i + 1) / len(times) * 100))
+    progress("frames at", 100, f"{len(out)} frame(s)")
+    return out
+
+
+def read_info_json(source: Path) -> Dict[str, Any]:
+    """yt-dlp's `<name>.info.json` beside a downloaded video, or {}."""
+    f = source.with_name(source.stem + ".info.json")
+    try:
+        return json.loads(f.read_text(encoding="utf-8", errors="replace")) if f.is_file() else {}
+    except (OSError, ValueError):
+        return {}
+
+
+_LECTURE_WORDS = re.compile(
+    r"\b(lecture|lesson|tutorial|how[- ]?to|guide|walkthrough|course|class|webinar|workshop|masterclass|explained|"
+    r"introduction to|intro to|crash course|step[- ]by[- ]step|setup|install|configure|"
+    r"лекци|урок|туториал|инструкци|гайд|курс|вебинар|мастер[- ]класс|разбор|обучени|настройк|установк|как (?:сделать|настроить|установить|работать)|"
+    r"objašnj|erklärt|anleitung|kurs|clase|lección|cómo|tuto)", re.I)
+
+
+def lecture_hint(source: Path, p: Dict[str, Any], segs: Optional[List[Dict[str, Any]]]) -> Dict[str, Any]:
+    """Does this look like a lecture / tutorial — a talking person and things shown on a screen — rather than
+    footage to watch? From the site's info (category, title, description, tags, chapters) and the speech
+    density. {hint, score, reasons} — a suggestion for the user, never a switch."""
+    info = read_info_json(source)
+    reasons: List[str] = []
+    score = 0
+    cats = " ".join(str(x) for x in (info.get("categories") or [])).lower()
+    if any(c in cats for c in ("education", "howto", "science & technology")):
+        score += 2; reasons.append(f"category: {cats.strip()}")
+    text = " ".join(str(info.get(k) or "") for k in ("title", "description")) + " " + " ".join(str(x) for x in (info.get("tags") or []))
+    m = _LECTURE_WORDS.search(text[:4000])
+    if m:
+        score += 2; reasons.append(f"title/description: «{m.group(0)}»")
+    ch = info.get("chapters") or []
+    if len(ch) >= 3:
+        score += 1; reasons.append(f"{len(ch)} chapters")
+    dur = float(p.get("duration") or 0)
+    if dur >= 8 * 60:
+        score += 1; reasons.append(f"{tcode(dur)} long")
+    if segs:
+        spoken = sum(max(0.0, float(x.get("end", 0)) - float(x.get("start", 0))) for x in segs)
+        if dur and spoken / dur >= 0.6:
+            score += 1; reasons.append(f"speech {spoken / dur:.0%} of the time")
+    return {"hint": score >= 3, "score": score, "reasons": reasons}
+
+
+def _lines_around(items: List[Any], t: float, before: float = 4.0, after: float = 4.0) -> List[str]:
+    return [x[1] for x in items if x[2]["kind"] != "sound" and x[2]["a"] <= t + after and x[2]["b"] >= t - before]
+
+
+def frames_at_blocks(m: Dict[str, Any], label: str, frames: List[Dict[str, Any]], rerun: Optional["Rerun"] = None) -> List[Dict[str, Any]]:
+    """The frames asked for by time, one image each, the words spoken around each under it."""
+    p = m["probe"]
+    items = timeline_items(m)
+    wh = jpeg_size(frames[0]["file"]) if frames else None
+    per = claude_image_tokens(*wh) if wh else 0
+    head = (f"[{label}: video \"{Path(m['source']).name}\", {tcode(p['duration'])} — the {len(frames)} frame(s) you asked for, "
+            f"one per moment, {AT_WIDTH}px on the long side, each tagged [mm:ss.cc] with the words spoken around it"
+            + (f"; ≈ {per * len(frames):,} image tokens by Anthropic's formula for Claude" if per else "") + ".\nRules:\n"
+            "1. A frame is the picture at exactly that moment: if it caught a cut, a transition or a blur, ask for the same "
+            f"moment a second earlier or later ({rerun.at(['mm:ss']) if rerun else 'with --frames at --times mm:ss'}).\n"
+            "2. Say what the frame shows and read what is on it (text, labels, values) — that is what it was asked for; a "
+            "frame of the speaker alone shows nothing — ask for another moment.\n"
+            + (f"3. {rerun.cannot()}" if rerun else "3. If you cannot run commands, give the user the command.") + "]")
+    out: List[Dict[str, Any]] = [{"type": "text", "text": head, "role": "head"}]
+    for f in frames:
+        tag = f"{tcode(math.floor(f['t']))}.{int(round((f['t'] % 1) * 100)):02d}"
+        lines = _lines_around(items, f["t"])
+        out.append({"type": "text", "text": f"[{tag}]", "role": "tag"})
+        out.append({"type": "image", "path": f["file"], "t": f["t"], "tag": tag, "lines": lines, "entries": []})
+        if lines:
+            out.append({"type": "text", "text": "\n".join(lines), "role": "lines"})
+    return out
+
+
+def lecture_blocks(m: Dict[str, Any], label: str, rerun: Optional["Rerun"] = None) -> List[Dict[str, Any]]:
+    """The lecture lane: no frames — the whole transcript with time spans (and the site's chapters), and the
+    rules: read it, decide where the SCREEN matters, ask for single frames at exactly those moments."""
+    p = m["probe"]
+    dur = p["duration"]
+    info = read_info_json(Path(m["source"]))
+    chapters = info.get("chapters") or []
+    tm = m.get("transcript_meta") or {}
+    src = ("the site's own captions" + (" (written by people)" if tm.get("kind") == "manual" else " (automatic — they can mishear)" if tm.get("kind") == "automatic" else "")
+           if tm.get("source") == "captions" else "an automatic speech transcript — it can mishear words")
+    per = claude_image_tokens(*fit_dims(p["width"], p["height"], AT_WIDTH)) if p.get("width") and p.get("height") else 0
+    title = str(info.get("title") or "").strip()
+    rules = [
+        "This is a lecture, a tutorial or an instruction: most of the picture is a person talking, so NO frames come with "
+        "this lane — the words below are the whole of it" + (f" ({src})" if src else "") + ". Read them first.",
+        "Then decide where the SCREEN matters: a slide, a diagram, an interface, code, a table, a formula, text on screen, "
+        "a demonstration — and also whatever is simply being talked about (a button, a panel, a chart) that is clearer "
+        "seen than described. Ask for exactly those moments, one frame each: "
+        + (rerun.at(["03:12", "07:40"]) if rerun else "run video2llm with --frames at --times 03:12,07:40")
+        + " — any number, 3 or 30, by the sense of what is said and shown ("
+        + (f"≈ {per:,} tokens a frame, " if per else "") + f"up to {AT_MAX} a request); frames of the speaker alone are "
+        "not needed; no need to ask the user before this — the lecture mode is their choice.",
+        "Answer from the words AND the frames: what is said, what is shown, what is written on the screen. When something "
+        "is not visible in the frames you got, say so or ask for another moment.",
+        "When you have answered, offer the user a written guide of this video — a summary or a step-by-step instruction "
+        "with those frames as illustrations at the right places — and make it only if they say yes.",
+    ]
+    if p.get("has_audio"):
+        rules.append("Sounds other than speech, or every frame of a short moment, are available as for any video: ask the user "
+                     "with the cost first (" + (f"{rerun.frames()} / {rerun.sounds()}" if rerun else "--frames all / --sounds") + ").")
+    if rerun:
+        rules.append(f"Use only {rerun.these()} for this video; do not open the video file or run anything else on it. {rerun.cannot()}")
+    head = (f"[{label}: video \"{Path(m['source']).name}\"" + (f" — «{title}»" if title else "") + f", {tcode(dur)}, {p['width']}×{p['height']}, "
+            "LECTURE MODE.\nRules:\n" + "\n".join(f"{k + 1}. {r}" for k, r in enumerate(rules)) + "]")
+    out: List[Dict[str, Any]] = [{"type": "text", "text": head, "role": "head"}]
+    if chapters:
+        out.append({"type": "text", "role": "before", "text": "[chapters, from the site]\n" + "\n".join(
+            f"[{tcode(float(c.get('start_time') or 0))}] {str(c.get('title') or '').strip()}" for c in chapters)})
+    items = timeline_items(m)
+    lines = [x[1] for x in items]
+    out.append({"type": "text", "role": "rest", "text": "[the words, with their time spans]\n" + ("\n".join(lines) if lines else "(no words were recognised)")})
+    return out
 
 
 # ── lane sheets: an agent opens one image per 3 (overview) or 6 (frame by frame) frames ───────────────
@@ -2499,11 +2656,14 @@ def main(argv: Optional[List[str]] = None) -> None:
     ap.add_argument("video", help="video file (mp4, mov, m4v, webm, mpeg, avi, 3gp …) or a URL (YouTube, Vimeo, a direct link — "
                                   "anything yt-dlp knows; downloaded once into <Videos>/video2llm/downloads, up to 1080p)")
     g = ap.add_argument_group("which frames")
-    g.add_argument("--frames", choices=["1", "all"], default="1",
+    g.add_argument("--frames", choices=["1", "all", "none", "at"], default="1",
                    help="1 = one frame per second over the whole video, 768px (default) — what happens, who says what; "
                         f"all = frame by frame, {DENSE_WIDTH}px — every frame from --start to --end, both included (flicker, "
                         f"glitches, fast motion); up to {DENSE_MAX_FRAMES} frames per request (4 s at 30 fps, 2 s at 60), "
-                        "never thinned — a longer span is refused with the pieces to ask for")
+                        "never thinned — a longer span is refused with the pieces to ask for; "
+                        "none = the LECTURE lane: no frames, the whole transcript (and the site's chapters) with the rules to ask "
+                        f"for single frames where the screen matters; at = single frames at --times, {AT_WIDTH}px")
+    g.add_argument("--times", metavar="T,T,…", help=f"with --frames at: the moments, mm:ss or mm:ss.cc, comma-separated (up to {AT_MAX})")
     g.add_argument("--all-frames", action="store_true", help=argparse.SUPPRESS)  # old name of --frames all
     g.add_argument("--fps", type=int, default=FRAME_FPS, choices=range(1, OVERVIEW_FPS_MAX + 1), metavar="N",
                    help=f"a denser overview, 2–{OVERVIEW_FPS_MAX} frames a second (default 1): the frames between the seconds are "
@@ -2573,6 +2733,10 @@ def main(argv: Optional[List[str]] = None) -> None:
     g.add_argument("--download-only", action="store_true",
                    help="with a URL: download the video and its captions, print the file's path to stdout and stop (for a program "
                         "that runs the rest itself)")
+    g.add_argument("--json", action="store_true",
+                   help="with --download-only: print JSON instead — {file, title, duration, language, lecture: {hint, score, reasons}}; "
+                        "the lecture hint says whether the video looks like a lecture / tutorial (the site's category, title, "
+                        "chapters, length) — a suggestion to use --frames none")
     g.add_argument("--yt-dlp", help="yt-dlp for a video URL: a path or a command line (\"py -m yt_dlp\"); default: the one on PATH "
                                     "or the yt_dlp module of this Python")
     g.add_argument("--quiet", action="store_true")
@@ -2595,7 +2759,18 @@ def main(argv: Optional[List[str]] = None) -> None:
         log(f"video2llm {VERSION} — {a.video.strip()}")
         source = download_video(a.video.strip(), tools, progress, a.yt_dlp, a.language, captions_prefer).resolve()
         if a.download_only:
-            print(str(source), flush=True)
+            if a.json:
+                info = read_info_json(source)
+                try:
+                    pr = tools.probe(source)
+                except Exception:  # noqa: BLE001 — the hint is best effort
+                    pr = {"duration": float(info.get("duration") or 0)}
+                cap = captions_beside(source, None, captions_prefer)
+                print(json.dumps({"file": str(source), "title": info.get("title"), "duration": pr.get("duration"),
+                                  "language": info.get("language"), "captions": (cap or {}).get("kind"),
+                                  "lecture": lecture_hint(source, pr, (cap or {}).get("segments"))}, ensure_ascii=False), flush=True)
+            else:
+                print(str(source), flush=True)
             return
     else:
         if a.download_only:
@@ -2619,6 +2794,16 @@ def main(argv: Optional[List[str]] = None) -> None:
         sys.exit("--start / --end: expected mm:ss or h:mm:ss, like 0:05 or 1:02:30")
     if end is not None and end < start:  # equal is one anchor: one frame, or for sounds its whole second
         sys.exit("--end must not be before --start")
+    at_times: List[float] = []
+    if a.frames == "at":
+        try:
+            at_times = [parse_tcode(x.strip()) for x in (a.times or "").split(",") if x.strip()]
+        except ValueError:
+            sys.exit("--times: expected mm:ss or mm:ss.cc, comma-separated, like 3:12,7:40.5")
+        if not at_times:
+            sys.exit("--frames at needs --times mm:ss,mm:ss,…")
+        if len(at_times) > AT_MAX:
+            sys.exit(f"--times: up to {AT_MAX} moments a request — ask for the rest separately")
     log(f"video2llm {VERSION} — {source.name}")
     if a.out:
         out_dir = Path(a.out).expanduser().resolve()
@@ -2641,7 +2826,10 @@ def main(argv: Optional[List[str]] = None) -> None:
                 overview_fps=a.fps)
 
     dense = a.frames == "all"
-    blocks = lane_blocks(m, a.label, start, a.max_frames, dense, end=end, fps_overview=a.fps)
+    if a.frames in ("none", "at"):
+        blocks = []   # these lanes are built below, after the rerun command is known
+    else:
+        blocks = lane_blocks(m, a.label, start, a.max_frames, dense, end=end, fps_overview=a.fps)
     # frame-by-frame output is written beside the overview, never over it: lane.md stays the 1 fps lane
     d = m.get("dense") or {}
     if dense:
@@ -2664,6 +2852,25 @@ def main(argv: Optional[List[str]] = None) -> None:
            + (f" --ffmpeg {shell_arg(a.ffmpeg)}" if a.ffmpeg else "") + (f" --ffprobe {shell_arg(a.ffprobe)}" if a.ffprobe else "")
            + (f" --sounds-model {shell_arg(a.sounds_model)}" if a.sounds_model else ""))
     rerun = Rerun(cmd, source, a.agent_tool)
+    if a.frames == "at":
+        dur0 = m["probe"]["duration"]
+        times = sorted({round(min(max(0.0, t), max(0.0, dur0 - 0.05)), 2) for t in at_times})  # time order, each moment once
+        cut = cut_frames_at(tools, Path(m.get("work") or m["source"]), out_dir, names, times, progress)
+        md_blocks = frames_at_blocks(m, a.label, cut, rerun)
+        tagged = "_".join(fmt_t(t) for t in times[:2]) + (f"_+{len(times) - 2}" if len(times) > 2 else "")
+        path = out_dir / (f"lane at {tagged}.md" if names is NAMES["ru"] else f"lane_at_{tagged}.md")
+        write_markdown(md_blocks, a.ask or a.prompt, path)
+        wh = jpeg_size(cut[0]["file"]) if cut else None
+        log(f"  frames at {len(cut)} moment(s)" + (f" ≈ {claude_image_tokens(*wh) * len(cut):,} image tokens" if wh else ""))
+        log(f"  wrote {path}")
+        return
+    if a.frames == "none":
+        md_blocks = lecture_blocks(m, a.label, rerun)
+        path = out_dir / ("lane лекция.md" if names is NAMES["ru"] else "lane_lecture.md")
+        write_markdown(md_blocks, a.ask or a.prompt, path)
+        log(f"  lecture lane: {len(m.get('transcript') or [])} line(s), no frames")
+        log(f"  wrote {path}")
+        return
     # a sound request alone (--sounds without --frames all / --format) only prints and saves the tags
     formats = set(a.format or ([] if a.sounds and not dense else ["md"]))
     if "all" in formats:

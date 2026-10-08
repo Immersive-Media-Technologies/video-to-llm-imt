@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.6.0] — 2026-10-08
+
+- **The lecture lane — `--frames none`.** A lecture, a tutorial, an instruction is a talking person: a stream of
+  frames is wasted tokens. This lane carries no frames — the whole transcript (the site's captions when there
+  are any) with the time spans and the site's chapters, and the rules: read it, decide where the SCREEN matters
+  (a slide, a diagram, an interface, code, text on screen, a demonstration — or simply what is being talked
+  about, clearer seen than described) and ask for single frames at exactly those moments, any number, 3 or 30;
+  then offer the user a written guide with those frames as illustrations.
+- **Single frames by time — `--frames at --times 3:12,7:40.5`:** one frame per moment, 1024px on the long side
+  (readable text), in `frames_at_1024px/`, `lane_at_*.md` + `.json` with the words spoken around each frame;
+  up to 40 a request. The normal lane mentions it for a few exact moments (cheaper than frame by frame).
+- **`--download-only --json`** prints `{file, title, duration, language, captions, lecture: {hint, score, reasons}}` —
+  the lecture hint says whether the video looks like a lecture / tutorial (the site's category, title and
+  description, chapters, length, how much of the time is speech): a suggestion, never a switch.
+
 ## [0.5.1] — 2026-10-08
 
 - **Which captions:** `--captions LANGS` (default: this computer's UI language) names the subtitle languages to

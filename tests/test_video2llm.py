@@ -490,3 +490,39 @@ def test_a_subtitle_file_beside_the_video_stands_in_for_whisper(clip, tmp_path):
     assert "Привет, Даня!" in head and "Hi Danya!" not in head and "site's own captions" in head
     r2 = run(v, "--language", "en", "--out", tmp_path / "en_lane")   # --language picks the file
     assert "Hi Danya!" in (tmp_path / "en_lane" / "lane.md").read_text(encoding="utf-8")
+
+
+def test_single_frames_at_moments(clip, tmp_path):
+    out = tmp_path / "at"
+    r = run(clip, "--no-transcript", "--frames", "at", "--times", "1:00,0:02.5,4", "--out", out, "--agent-tool", "video")
+    assert "frames at 3 moment(s)" in r.stderr
+    md = next(out.glob("lane_at_*.md"))
+    head = md.read_text(encoding="utf-8")
+    assert "the 3 frame(s) you asked for" in head and "[00:02.50]" in head and "[00:04.00]" in head
+    assert '"what": "at"' in head and "Rules:" in head
+    files = sorted((out / "frames_at_1024px").glob("*.jpg"))
+    assert [f.name for f in files] == ["00-02.50.jpg", "00-04.00.jpg", "00-05.95.jpg"]   # 1:00 is past the end → the last frame
+    assert video2llm.jpeg_size(str(files[0]))[1] == 1024   # portrait: the long side is 1024
+    lane = json.loads(md.with_suffix(".json").read_text(encoding="utf-8"))
+    assert [b["tag"] for b in lane["blocks"] if b["type"] == "image"] == ["00:02.50", "00:04.00", "00:05.95"]
+    r2 = run(clip, "--no-transcript", "--frames", "at", "--out", out, ok=False)
+    assert r2.returncode != 0 and "--times" in r2.stderr
+
+
+def test_lecture_lane_has_the_words_and_no_frames(clip, tmp_path):
+    v = tmp_path / "lecture.mp4"
+    shutil.copy(clip, v)
+    (tmp_path / "lecture.en.srt").write_text("1\n00:00:01,000 --> 00:00:02,500\nOpen the Settings panel\n\n2\n00:00:03,000 --> 00:00:04,000\nand click Export\n", encoding="utf-8")
+    (tmp_path / "lecture.info.json").write_text(json.dumps({"title": "Export tutorial", "categories": ["Education"], "language": "en",
+                                                             "subtitles": {"en": []}, "chapters": [{"start_time": 0, "title": "Intro"}, {"start_time": 3, "title": "Export"}]}), encoding="utf-8")
+    r = run(v, "--frames", "none", "--agent-tool", "video")
+    assert "lecture lane: 2 line(s), no frames" in r.stderr
+    out = v.with_name("lecture_frames")
+    head = (out / "lane_lecture.md").read_text(encoding="utf-8")
+    assert "LECTURE MODE" in head and "«Export tutorial»" in head and "NO frames" in head
+    assert "Open the Settings panel" in head and "and click Export" in head and "[chapters, from the site]" in head
+    assert '"what": "at", "times": ["03:12", "07:40"]' in head and "written by people" in head
+    assert not (out / "frames_1fps_768px").exists() or not list((out / "frames_1fps_768px").glob("*.jpg"))
+    hint = video2llm.lecture_hint(v, {"duration": 6.0}, [{"start": 1, "end": 2.5}, {"start": 3, "end": 4}])
+    assert hint["hint"] is True and "category" in " ".join(hint["reasons"])
+    assert video2llm.lecture_hint(clip, {"duration": 6.0}, None)["hint"] is False

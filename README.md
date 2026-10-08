@@ -52,6 +52,12 @@ told to use nothing on the video but the script's commands: no ffmpeg of its own
 reading of the tool's working files. A model that cannot run commands (a chat app) gives you the exact
 command to run and reads what it writes.
 
+**Lectures, tutorials, instructions** (`--frames none`): most of the picture is a person talking, so the lane
+carries no frames — the whole transcript with the time spans and the site's chapters, and the rules to decide
+where the screen matters and ask for single larger frames at exactly those moments (`--frames at --times …`,
+1024px each, any number); frames of the speaker are never asked for. With a URL, `--download-only --json`
+says whether the video looks like one (the site's category, title, chapters, length) so an app can suggest the mode.
+
 ## How the frames reach the model
 
 A model reads images differently depending on where you talk to it, so the script writes the same frames
@@ -292,10 +298,12 @@ python3 video2llm.py clip.mp4 --agent-tool video                     # for a har
 python3 video2llm.py clip.mp4 --sheet-frames 6                       # six frames to a sheet (scaled to fit) — half the files for a chat that counts them
 python3 video2llm.py clip.mp4 --native --format gemini               # the video itself, fitted into 19 MB
 python3 video2llm.py https://youtu.be/…                              # a video by URL (yt-dlp): its captions stand in for Whisper
+python3 video2llm.py lecture.mp4 --frames none                       # the LECTURE lane: no frames — the words, then single frames on request
+python3 video2llm.py lecture.mp4 --frames at --times 3:12,7:40       # one 1024px frame at each moment (a slide, an interface, text)
 ```
 
 ```
-video2llm 0.5.1 — IMG_2056.MOV
+video2llm 0.6.0 — IMG_2056.MOV
   [probe] 100% — 720×1280, 02:29, 30.00 fps, audio
   frames: 1 per second over the whole video, 768px on the long side — frame by frame for a moment: --frames all --start mm:ss --end mm:ss (up to 4.0 s)
   [frames] 100% — 149 frames at 1/s
@@ -456,6 +464,9 @@ Notices for the models and tools it downloads: [THIRD-PARTY-NOTICES.md](THIRD-PA
 
 Every version is on the [Releases](../../releases) page.
 
+- v0.6.0 — the lecture lane (`--frames none`: no frames, the words and the chapters, the model asks for single
+  frames where the screen matters), `--frames at --times` (one 1024px frame per moment), the lecture hint in
+  `--download-only --json`.
 - v0.5.1 — `--captions LANGS`: which subtitle languages to fetch and prefer; manual tracks before machine
   translations (yt-dlp's info file).
 - v0.5.0 — the site's captions (and any `.vtt` / `.srt` beside a video) stand in for Whisper; `--download-only`
