@@ -135,7 +135,7 @@ their own (in an earlier round, before the rules, two of them did).
 
 Compared with the projects closest to it, from their READMEs as of 2026-10-07:
 
-| | V2L-IMT | claude-real-video | watch-cli | mathiaschu/watch | peepshow | mcp-video-analyzer | llm-video-frames | Video2LLM (DiogoNeves) | Video-to-LLM-Context-Extractor |
+| | V2L-IMT (this repo) | claude-real-video | watch-cli | mathiaschu/watch | peepshow | mcp-video-analyzer | llm-video-frames | Video2LLM (DiogoNeves) | Video-to-LLM-Context-Extractor |
 |---|---|---|---|---|---|---|---|---|---|
 | Form | one Python file (CLI) | CLI + MCP + skill + web | CLI + skill + MCP | Claude Code skill | CLI + plugins | MCP server | `llm` plugin | Python scripts | Electron app |
 | Frames | 1 fps overview | scenes + dedup, ≥ 1 fps floor | 8 evenly spaced | auto, ≤ 2 fps, ≤ 100 | scenes + dedup, ≤ 40 | scenes + dedup, ≤ 60 | fixed fps | 10 fps, 20 max | intervals |
