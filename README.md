@@ -295,7 +295,7 @@ python3 video2llm.py https://youtu.be/…                              # a video
 ```
 
 ```
-video2llm 0.4.0 — IMG_2056.MOV
+video2llm 0.4.1 — IMG_2056.MOV
   [probe] 100% — 720×1280, 02:29, 30.00 fps, audio
   frames: 1 per second over the whole video, 768px on the long side — frame by frame for a moment: --frames all --start mm:ss --end mm:ss (up to 4.0 s)
   [frames] 100% — 149 frames at 1/s
@@ -450,6 +450,7 @@ Notices for the models and tools it downloads: [THIRD-PARTY-NOTICES.md](THIRD-PA
 
 Every version is on the [Releases](../../releases) page.
 
+- v0.4.1 — `--yt-dlp` takes a command line too; the Windows test of the download path.
 - v0.4.0 — a video by URL (YouTube, Vimeo, direct links — yt-dlp, optional): downloaded once up to 1080p into the
   Videos folder, then everything as for a local file; with `--agent-tool` the header names the frame files so an
   agent asked for one frame reads it instead of searching for it.

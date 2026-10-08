@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.4.1] — 2026-10-08
+
+- `--yt-dlp` / `VIDEO2LLM_YT_DLP` also take a command line (`"py -m yt_dlp"`, a venv's Python with the module).
+- Tests: the stand-in yt-dlp is run as a command line — on Windows a `.bat` let `cmd` read the `<` of
+  `[height<=1080]` as a redirection (CI, windows-latest).
+
 ## [0.4.0] — 2026-10-08
 
 - **A video by URL** — `video2llm https://youtu.be/…`: YouTube, Vimeo, a direct link, anything

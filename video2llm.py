@@ -68,7 +68,7 @@ import zipfile
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
-VERSION = "0.4.0"
+VERSION = "0.4.1"
 
 # ── constants (same numbers as the Deep Artisan pipeline) ────────────────────────────────────────
 NATIVE_LIMIT_BYTES = 19 * 1024 * 1024  # Gemini request limit 20 MB minus headroom
@@ -823,11 +823,15 @@ URL_RE = re.compile(r"^https?://", re.I)
 
 
 def yt_dlp_command(override: Optional[str]) -> Optional[List[str]]:
-    """The yt-dlp to run: --yt-dlp / VIDEO2LLM_YT_DLP / the `yt-dlp` on PATH / the yt_dlp module of this
-    Python. None when there is none."""
+    """The yt-dlp to run: --yt-dlp / VIDEO2LLM_YT_DLP (a path, or a command line like "py -m yt_dlp") / the
+    `yt-dlp` on PATH / the yt_dlp module of this Python. None when there is none."""
     cand = override or os.environ.get("VIDEO2LLM_YT_DLP") or shutil.which("yt-dlp")
     if cand and (Path(cand).exists() or shutil.which(cand)):
         return [cand]
+    if cand and " " in cand.strip():  # a command line: "py -m yt_dlp", "/opt/venv/bin/python -m yt_dlp"
+        parts = [x.strip("\"'") for x in shlex.split(cand, posix=(os.name != "nt"))]
+        if parts and (Path(parts[0]).exists() or shutil.which(parts[0])):
+            return parts
     import importlib.util
     if importlib.util.find_spec("yt_dlp") is not None:
         return [sys.executable, "-m", "yt_dlp"]
@@ -2395,7 +2399,8 @@ def main(argv: Optional[List[str]] = None) -> None:
                    help="the lane is for an agent harness that runs this script itself: the header tells the model to call "
                         "the tool NAME with {video, what: next | frames | sounds, start, end} instead of giving it commands")
     g.add_argument("--ffmpeg", help="path to ffmpeg"); g.add_argument("--ffprobe", help="path to ffprobe")
-    g.add_argument("--yt-dlp", help="path to yt-dlp (for a video URL; default: the one on PATH or the yt_dlp module)")
+    g.add_argument("--yt-dlp", help="yt-dlp for a video URL: a path or a command line (\"py -m yt_dlp\"); default: the one on PATH "
+                                    "or the yt_dlp module of this Python")
     g.add_argument("--quiet", action="store_true")
     g.add_argument("--version", action="version",
                    version=f"V2L-IMT {VERSION} — © 2026 Immersive Media Technologies, IMT Non-Commercial License (non-commercial use only, "

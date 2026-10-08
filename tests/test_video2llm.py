@@ -376,23 +376,16 @@ prints["after_move:filepath"].write_text(str(dest) + "\\n", encoding="utf-8")
 """
 
 
-def fake_yt_dlp_on_path(tmp_path):
-    """A `yt-dlp` first on PATH that runs the stand-in above with this Python."""
-    d = tmp_path / "fakebin"
-    d.mkdir(exist_ok=True)
-    py = d / "fake_yt_dlp.py"
+def fake_yt_dlp(tmp_path):
+    """The stand-in above as the yt-dlp to run — a command line (this Python + the script), the same on
+    every platform; a .bat on Windows would let cmd read the `<` of `[height<=1080]` as a redirection."""
+    py = tmp_path / "fake_yt_dlp.py"
     py.write_text(FAKE_YT_DLP, encoding="utf-8")
-    if os.name == "nt":
-        (d / "yt-dlp.bat").write_text(f'@"{sys.executable}" "{py}" %*\n', encoding="utf-8")
-    else:
-        sh = d / "yt-dlp"
-        sh.write_text(f'#!{sys.executable}\nimport runpy, sys\nsys.argv[0] = r"{py}"\nrunpy.run_path(r"{py}", run_name="__main__")\n', encoding="utf-8")
-        sh.chmod(0o755)
-    return {"PATH": str(d) + os.pathsep + os.environ.get("PATH", ""), "VIDEO2LLM_YT_DLP": ""}
+    return {"VIDEO2LLM_YT_DLP": f'"{sys.executable}" "{py}"'}
 
 
 def test_a_url_is_downloaded_with_yt_dlp_then_treated_as_a_file(clip, tmp_path):
-    env = fake_yt_dlp_on_path(tmp_path)
+    env = fake_yt_dlp(tmp_path)
     env["VIDEO2LLM_TEST_CLIP"] = str(clip)
     env["VIDEO2LLM_DOWNLOADS"] = str(tmp_path / "downloads")   # this test's folder, not the user's Videos
     out = tmp_path / "lane"
