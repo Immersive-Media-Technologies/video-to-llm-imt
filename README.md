@@ -75,8 +75,6 @@ and the script builds **one page**:
   your browser into your downloads folder — two frames to a row, nothing breaks across pages;
 - it is written in whatever language the model writes in.
 
-![A guide written from a Premiere Pro tutorial: numbered steps, frames at the moments that matter](assets/guide-page.jpg)
-
 **The address is yours.** The page goes to your own [Neocities](https://neocities.org) site (free: 1 GB,
 and the page stays as long as the account does). The first time, a page opens on your computer with three
 steps — sign up (a minute), copy the API key (Profile → Settings → Manage Site Settings → API Key), paste
