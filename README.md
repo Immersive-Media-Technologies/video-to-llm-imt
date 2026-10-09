@@ -95,7 +95,7 @@ Compared with the projects closest to it, from their READMEs as of 2026-10-07:
 | | **V2L-IMT&nbsp;(this&nbsp;repo)** | claude-real-video | watch-cli | mathiaschu/<br>watch | peepshow | mcp-video-analyzer | llm-video-frames | Video2LLM (DiogoNeves) | Video-to-LLM-Context-Extractor |
 |---|---|---|---|---|---|---|---|---|---|
 | Form | one Python file (CLI) | CLI + MCP + skill + web | CLI + skill + MCP | Claude Code skill | CLI + plugins | MCP server | `llm` plugin | Python scripts | Electron app |
-| **The Lane** | 1&nbsp;fps&nbsp;overview,&nbsp;or&nbsp;the&nbsp;lecture&nbsp;lane by the material; contact sheets with the words and sounds | scenes + dedup, ≥ 1 fps floor | 8 evenly spaced | auto, ≤ 2 fps, ≤ 100 | scenes + dedup, ≤ 40 | scenes + dedup, ≤ 60 | fixed fps | 10 fps, 20 max | intervals |
+| **The Lane** | 1&nbsp;fps&nbsp;overview,&nbsp;or&nbsp;the lecture lane by the material; contact sheets with the words and sounds | scenes + dedup, ≥ 1 fps floor | 8 evenly spaced | auto, ≤ 2 fps, ≤ 100 | scenes + dedup, ≤ 40 | scenes + dedup, ≤ 60 | fixed fps | 10 fps, 20 max | intervals |
 | **Every frame of a chosen moment** | **✅ on request, anchored on two overview frames, never thinned** | ❌ (dedup always on) | ❌ | ❌ (2 fps cap) | ❌ | partly (2–30 frame burst) | ❌ | ❌ | ❌ |
 | **Token cost given to the model before it asks** | **✅ per frame, per second, per message** | in the docs | price per video (API) | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
 | Speech | local Whisper (Deep Artisan filters) or the site's captions | local Whisper / captions | hosted API (key) | captions / local Whisper | whisper.cpp / cloud | captions / Whisper / API | ❌ | ❌ | Google cloud |
