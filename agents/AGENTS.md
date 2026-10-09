@@ -6,9 +6,10 @@
 # Watching a video — video2llm
 
 **When:** the user gives a video — a file (mp4, mov, mkv, webm, avi …) or a link to one (YouTube, Vimeo,
-Rutube, VK, TikTok, Twitch, Dailymotion, a direct .mp4 …) — and wants something from it: what happens, what
-is said or shown, a question about it, a summary, notes or a guide of it. Do not open the file or the page
-yourself, do not run ffmpeg or yt-dlp — run the script and work from what it writes:
+Rutube, VK, TikTok, Twitch, Dailymotion, a direct .mp4 …) — or a sound file (mp3, wav, m4a, ogg, flac …) and
+wants something from it: what happens, what is said or shown, a question about it, a summary, notes or a
+guide of it. Do not open the file or the page yourself, do not run ffmpeg or yt-dlp — run the script and
+work from what it writes:
 
     python3 /path/to/video2llm.py <video file or URL>
 
@@ -21,7 +22,10 @@ material** which lane to write and says why:
 - **Something taught, shown or explained** (a lecture, a tutorial, a how-to, a course lesson, a webinar, a
   talk, a review or breakdown of a tool or a technique) → `lane_lecture.md`: the whole transcript with the
   chapters and no frames — a talking person is not worth frames; you ask for single larger frames at exactly
-  the moments where the screen matters.
+  the moments where the screen matters. A local file has no site to ask: its name and how much of it is
+  speech decide.
+- **A sound file** (a podcast, a recording of a talk, a voice memo) → `lane_audio.md`: the words with their
+  time spans, no frames — there is no picture; the sounds of a moment on request.
 
 Then:
 

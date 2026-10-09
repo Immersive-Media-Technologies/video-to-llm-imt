@@ -68,7 +68,7 @@ import zipfile
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-VERSION = "0.7.0"
+VERSION = "0.7.1"
 
 # ── constants (same numbers as the Deep Artisan pipeline) ────────────────────────────────────────
 NATIVE_LIMIT_BYTES = 19 * 1024 * 1024  # Gemini request limit 20 MB minus headroom
@@ -173,13 +173,14 @@ class Tools:
     def probe(self, path: Path) -> Dict[str, Any]:
         r = run([self.ffprobe, "-v", "error", "-show_entries",
                  "format=duration,bit_rate:stream=codec_type,width,height,r_frame_rate:stream_tags=rotate"
-                 ":stream_side_data=rotation",
+                 ":stream_side_data=rotation:stream_disposition=attached_pic",
                  "-of", "json", str(path)])
         if r.returncode != 0:
             sys.exit(f"ffprobe failed: {r.stderr.strip()[:300]}")
         j = json.loads(r.stdout or "{}")
         streams = j.get("streams") or []
-        v = next((s for s in streams if s.get("codec_type") == "video"), {})
+        # a sound file's cover art is a "video" stream too (attached_pic) — it is not a picture that moves
+        v = next((s for s in streams if s.get("codec_type") == "video" and not (s.get("disposition") or {}).get("attached_pic")), {})
         # phones store portrait video as landscape + a rotation; ffmpeg turns the frames, the size must follow
         rot = 0
         try:
@@ -202,6 +203,7 @@ class Tools:
             "fps": fps,
             "bitrate_kbps": round(float((j.get("format") or {}).get("bit_rate") or 0) / 1000),
             "has_audio": any(s.get("codec_type") == "audio" for s in streams),
+            "has_video": bool(v),  # False — a sound file: no frames, the lane is the words and the sounds
             "bytes": path.stat().st_size,
         }
 
@@ -1197,6 +1199,12 @@ def p_has_audio(m: Dict[str, Any]) -> bool:
     return bool((m.get("probe") or {}).get("has_audio"))
 
 
+def p_has_video(p: Dict[str, Any]) -> bool:
+    """A picture that moves; False for a sound file (mp3, wav, m4a …). Manifests from before 0.7.1 have no flag:
+    a width stands in."""
+    return bool(p.get("has_video", p.get("width")))
+
+
 def frame_rate_limits(p: Dict[str, Any]) -> Dict[str, float]:
     """Frame-by-frame at this video's rate: the rate used (≤100), the source rate, the longest span per request."""
     src = p.get("fps") or 30.0
@@ -1249,7 +1257,8 @@ def prepare(source: Path, out_dir: Path, tools: Tools, names: Dict[str, str], *,
     progress("probe", 0)
     p = m.get("probe") or tools.probe(source)
     dur = max(0.5, p["duration"])
-    progress("probe", 100, f"{p['width']}×{p['height']}, {tcode(dur)}, {p['fps']:.2f} fps, {'audio' if p['has_audio'] else 'no audio'}")
+    progress("probe", 100, f"sound file, {tcode(dur)}" if not p_has_video(p) else
+             f"{p['width']}×{p['height']}, {tcode(dur)}, {p['fps']:.2f} fps, {'audio' if p['has_audio'] else 'no audio'}")
 
     # 2) which frames: --frames 1 → the 1 fps lane over the whole video; --frames all → every frame of a span
     dense: Optional[Dict[str, Any]] = m.get("dense")
@@ -1260,6 +1269,8 @@ def prepare(source: Path, out_dir: Path, tools: Tools, names: Dict[str, str], *,
         rate = f"{sp['fps']:.2f}".rstrip("0").rstrip(".")
         log(f"  frames: frame by frame — every frame from {tcode(sp['start'])} to {tcode(sp['end'])}, both included, "
             f"at {rate} per second" + ("" if sp["every"] else f" (of {p['fps']:.0f})") + f", {DENSE_WIDTH}px on the long side")
+    elif frames_mode == "none" and not p_has_video(p):
+        log("  frames: none — a sound file: the words with their time spans, and the sounds on request (--sounds)")
     elif frames_mode == "none":
         log("  frames: none — a lecture lane: the transcript, and single frames on request (--frames at --times mm:ss,…)")
     elif frames_mode == "at":
@@ -1841,6 +1852,8 @@ def sound_check(m: Dict[str, Any], tools: "Tools", out_dir: Path, names: Dict[st
         else:
             windows.append([a, b])
     kept, skipped, budget = [], [], lim["max_span"]
+    if not p_has_video(p):
+        windows = []  # a sound file: nothing to show, the tags are the answer
     for a, b in windows:
         if budget <= 0.05:
             skipped.append([a, b])
@@ -1885,7 +1898,11 @@ def sound_check(m: Dict[str, Any], tools: "Tools", out_dir: Path, names: Dict[st
                 + (f"\n4. {rerun.cannot()}" if rerun else "")
                 + "]")
     else:
-        head = (f"[{label}: video \"{Path(m['source']).name}\" — sound check of {tcode(s0)}–{tcode(s1)}: "
+        head = (f"[{label}: sound file \"{Path(m['source']).name}\" — sound check of {tcode(s0)}–{tcode(s1)}: the sounds "
+                "other than speech an AudioSet classifier heard there, with their times. " + (span.get("note") or "")
+                + f"\nRules:\n1. Say what is heard from the tags and the words; a sound file has no picture to show. {only}]"
+                if not p_has_video(p) else
+                f"[{label}: video \"{Path(m['source']).name}\" — sound check of {tcode(s0)}–{tcode(s1)}: "
                 + (span.get("note") or "nothing besides speech was identified") + " No frames: there is no sound to show the "
                 "source of; the overview frames of this moment stand. Tell the user that no other sounds could be "
                 f"identified there — not that there were none.\nRules:\n1. {other}\n2. {only}]")
@@ -1964,6 +1981,10 @@ def lecture_hint(source: Path, p: Dict[str, Any], segs: Optional[List[Dict[str, 
     m = _LECTURE_WORDS.search(text[:4000])
     if m:
         score += 2; reasons.append(f"title/description: «{m.group(0)}»")
+    else:  # a local file: its name is all the title there is
+        m = _LECTURE_WORDS.search(source.stem.replace("_", " ").replace("-", " "))
+        if m:
+            score += 2; reasons.append(f"file name: «{m.group(0)}»")
     ch = info.get("chapters") or []
     if len(ch) >= 3:
         score += 1; reasons.append(f"{len(ch)} chapters")
@@ -1972,7 +1993,9 @@ def lecture_hint(source: Path, p: Dict[str, Any], segs: Optional[List[Dict[str, 
         score += 1; reasons.append(f"{tcode(dur)} long")
     if segs:
         spoken = sum(max(0.0, float(x.get("end", 0)) - float(x.get("start", 0))) for x in segs)
-        if dur and spoken / dur >= 0.6:
+        if dur and spoken / dur >= 0.8:  # someone talking nearly all the time: a lecture even without a site's word
+            score += 2; reasons.append(f"speech {spoken / dur:.0%} of the time")
+        elif dur and spoken / dur >= 0.6:
             score += 1; reasons.append(f"speech {spoken / dur:.0%} of the time")
     return {"hint": score >= 3, "score": score, "reasons": reasons}
 
@@ -2018,12 +2041,12 @@ def document_offer_rule(rerun: Optional["Rerun"]) -> str:
         "the document goes to the user's own Neocities site (free); the first time it opens a page on this computer where they "
         "sign up and paste their API key (Neocities: Profile → Settings → Manage Site Settings → API Key) — tell them that, "
         "and never ask for a key in the chat")
-    return ("When you have answered, decide whether this video is MATERIAL TO KEEP — something taught, shown or explained: a "
+    return ("When you have answered, decide whether this video or recording is MATERIAL TO KEEP — something taught, shown or explained: a "
             "lecture, a tutorial, a how-to, a walkthrough, a course lesson, a webinar, a talk, a review or a breakdown of a tool "
             "or a technique, an explainer. Only then ask the user in ONE line whether to make the Guide (a step-by-step "
             "instruction, kind guide: numbered steps) or the Notes (a talk, kind notes) of it — name the one that fits — yes or "
             "no; on no, just go on. A film, a clip, a vlog, a sketch, a music video, an ad, a stream of someone playing or "
-            "chatting, home footage: do not offer it at all. It is one page of their own with the frames that matter, at a web "
+            "chatting, home footage: do not offer it at all. It is one page of their own with the frames that matter (none for a sound file), at a web "
             "address, with a «Download PDF» button on it: never ask about a PDF separately. Do not build anything before they "
             "answer. After it: " + how + ". Never build the page or the "
             "PDF by hand, and never call this «publishing» — it is the user's link, nothing is announced anywhere.")
@@ -2031,8 +2054,11 @@ def document_offer_rule(rerun: Optional["Rerun"]) -> str:
 
 def lecture_blocks(m: Dict[str, Any], label: str, rerun: Optional["Rerun"] = None) -> List[Dict[str, Any]]:
     """The lecture lane: no frames — the whole transcript with time spans (and the site's chapters), and the
-    rules: read it, decide where the SCREEN matters, ask for single frames at exactly those moments."""
+    rules: read it, decide where the SCREEN matters, ask for single frames at exactly those moments.
+    A sound file (no picture) gets the audio lane: the same words, the sounds on request, no frames at all."""
     p = m["probe"]
+    if not p_has_video(p):
+        return audio_blocks(m, label, rerun)
     dur = p["duration"]
     info = read_info_json(Path(m["source"]))
     chapters = info.get("chapters") or []
@@ -2068,6 +2094,37 @@ def lecture_blocks(m: Dict[str, Any], label: str, rerun: Optional["Rerun"] = Non
             f"[{tcode(float(c.get('start_time') or 0))}] {str(c.get('title') or '').strip()}" for c in chapters)})
     items = timeline_items(m)
     lines = [x[1] for x in items]
+    out.append({"type": "text", "role": "rest", "text": "[the words, with their time spans]\n" + ("\n".join(lines) if lines else "(no words were recognised)")})
+    return out
+
+
+def audio_blocks(m: Dict[str, Any], label: str, rerun: Optional["Rerun"] = None) -> List[Dict[str, Any]]:
+    """The audio lane (0.7.1): a sound file — a podcast, a recording of a talk, a voice memo, music. No picture
+    exists, so no frames are offered; the words with their time spans, the sounds other than speech on request."""
+    p = m["probe"]
+    dur = p["duration"]
+    info = read_info_json(Path(m["source"]))
+    chapters = info.get("chapters") or []
+    tm = m.get("transcript_meta") or {}
+    src = ("the site's own captions" if tm.get("source") == "captions" else "an automatic speech transcript — it can mishear words")
+    title = str(info.get("title") or "").strip()
+    rules = [
+        "This is a SOUND FILE: there is no picture, so no frames exist and none can be asked for — the words below are "
+        f"the whole of it ({src}). Read them first; answer from what is said and when.",
+        "Sounds other than speech (music, noises, applause, a door, a car) for a moment: ask the user with the cost first, "
+        "a yes or no — then " + (rerun.sounds() if rerun else "run video2llm with --sounds --start mm:ss --end mm:ss")
+        + " (free, on this computer; up to a few minutes a request). Do not guess at a sound from the words.",
+        document_offer_rule(rerun),
+    ]
+    if rerun:
+        rules.append(f"Use only {rerun.these()} for this file; do not open the file or run anything else on it. {rerun.cannot()}")
+    head = (f"[{label}: sound file \"{Path(m['source']).name}\"" + (f" — «{title}»" if title else "") + f", {tcode(dur)}, "
+            "AUDIO.\nRules:\n" + "\n".join(f"{k + 1}. {r}" for k, r in enumerate(rules)) + "]")
+    out: List[Dict[str, Any]] = [{"type": "text", "text": head, "role": "head"}]
+    if chapters:
+        out.append({"type": "text", "role": "before", "text": "[chapters, from the site]\n" + "\n".join(
+            f"[{tcode(float(c.get('start_time') or 0))}] {str(c.get('title') or '').strip()}" for c in chapters)})
+    lines = [x[1] for x in timeline_items(m)]
     out.append({"type": "text", "role": "rest", "text": "[the words, with their time spans]\n" + ("\n".join(lines) if lines else "(no words were recognised)")})
     return out
 
@@ -3576,14 +3633,21 @@ def main(argv: Optional[List[str]] = None) -> None:
         if len(at_times) > AT_MAX:
             sys.exit(f"--times: up to {AT_MAX} moments a request — ask for the rest separately")
     log(f"video2llm {VERSION} — {source.name}")
+    try:
+        pr0 = tools.probe(source)
+    except Exception:  # noqa: BLE001
+        pr0 = {"duration": float(read_info_json(source).get("duration") or 0)}
+    # 0.7.1: a sound file (mp3, wav, m4a …) has no picture: the audio lane — the words and the sounds, no frames,
+    # whatever --frames asked for
+    audio_only = "has_video" in pr0 and not p_has_video(pr0)
+    if audio_only:
+        if a.frames not in ("auto", "none"):
+            log(f"  a sound file: no frames to cut (--frames {a.frames} ignored) — the lane is the words and the sounds")
+        a.frames = "none"
     # --frames auto: a lecture / tutorial / review (by the site's info, before any cutting) → the lecture lane; otherwise
     # the overview is cut and the decision is taken again with the speech share (a local file has no site info)
     auto_hint: Optional[Dict[str, Any]] = None
     if a.frames == "auto":
-        try:
-            pr0 = tools.probe(source)
-        except Exception:  # noqa: BLE001
-            pr0 = {"duration": float(read_info_json(source).get("duration") or 0)}
         auto_hint = lecture_hint(source, pr0, None)
         a.frames = "none" if auto_hint["hint"] else "1"
         if auto_hint["hint"]:
@@ -3654,11 +3718,14 @@ def main(argv: Optional[List[str]] = None) -> None:
         log(f"  frames at {len(cut)} moment(s)" + (f" ≈ {claude_image_tokens(*wh) * len(cut):,} image tokens" if wh else ""))
         log(f"  wrote {path}")
         return
-    if a.frames == "none":
+    if a.frames == "none" and not (a.sounds and not a.format):  # a sound request on this lane falls through to the sound check
         md_blocks = lecture_blocks(m, a.label, rerun)
-        path = out_dir / ("lane лекция.md" if names is NAMES["ru"] else "lane_lecture.md")
+        if audio_only:
+            path = out_dir / ("lane звук.md" if names is NAMES["ru"] else "lane_audio.md")
+        else:
+            path = out_dir / ("lane лекция.md" if names is NAMES["ru"] else "lane_lecture.md")
         write_markdown(md_blocks, a.ask or a.prompt, path)
-        log(f"  lecture lane: {len(m.get('transcript') or [])} line(s), no frames")
+        log(f"  {'audio' if audio_only else 'lecture'} lane: {len(m.get('transcript') or [])} line(s), no frames")
         log(f"  wrote {path}")
         return
     # a sound request alone (--sounds without --frames all / --format) only prints and saves the tags

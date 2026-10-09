@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.7.1] — 2026-10-09
+
+- **Sound files.** mp3, wav, m4a, aac, ogg, opus, flac, aiff — whatever ffmpeg reads — get the audio lane
+  (`lane_audio.md`): the words with their time spans (captions beside the file, or Whisper), the sounds of a
+  moment on request (`--sounds`), no frames at all; `--frames 1 | all | at` on a sound file is ignored with a
+  note. A cover picture inside an mp3 is not taken for a video stream. The one question (the Guide / the
+  Notes) is asked of a recording too — a podcast or a talk makes Notes without frames.
+- **The lecture hint for local files.** A file has no site to ask, so its name counts as the title (`tutorial`,
+  `урок`, `how-to` …) and speech 80 % of the time or more counts double: a 10-minute talking-head tutorial
+  takes the lecture lane by itself; a film with dialogue (60–70 %) stays footage.
+- **`--sounds` on the lecture lane.** A sound request on a video that `--frames auto` put on the lecture lane
+  now brings the sound check, not the lecture lane again.
+
 ## [0.7.0] — 2026-10-08
 
 - **Notes — `video2llm guide --spec guide.json`:** the Guide or the Notes of a video from the structure the model wrote

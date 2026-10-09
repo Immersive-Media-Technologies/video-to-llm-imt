@@ -657,3 +657,62 @@ def test_frames_auto_picks_the_lane_by_the_material(clip, tmp_path):
     r = run(w, "--no-transcript", "--frames", "1")
     assert "auto:" not in r.stderr and (out / "lane.md").is_file()
 
+
+
+# ── sound files (0.7.1) ────────────────────────────────────────────────────────────────────────────────
+@pytest.fixture(scope="module")
+def sound(tmp_path_factory):
+    """5 s of a tone in a wav — a sound file: no picture at all."""
+    d = tmp_path_factory.mktemp("sound")
+    a = d / "voice memo.wav"
+    subprocess.run([FFMPEG, "-v", "error", "-f", "lavfi", "-i", "sine=frequency=440:duration=5", "-ac", "1", str(a)], check=True)
+    return a
+
+
+def test_a_sound_file_gets_the_audio_lane_whatever_frames_were_asked(sound):
+    r = run(sound, "--no-transcript", "--frames", "1", "--agent-tool", "video")
+    assert "a sound file: no frames to cut (--frames 1 ignored)" in r.stderr and "audio lane: 0 line(s), no frames" in r.stderr
+    out = sound.with_name("voice memo_frames")
+    assert (out / "lane_audio.md").is_file() and not (out / "lane.md").exists()
+    assert not any(p.is_dir() and p.name.startswith("frames") for p in out.iterdir())  # nothing was cut
+    head = (out / "lane_audio.md").read_text(encoding="utf-8")
+    assert 'sound file "voice memo.wav"' in head and "AUDIO" in head and "no frames exist and none can be asked for" in head
+    assert '"what": "sounds"' in head and '"what": "at"' not in head and "--frames all" not in head
+    assert "MATERIAL TO KEEP" in head and "video or recording" in head  # the one question fits a podcast too
+    m = json.loads((out / "video2llm.json").read_text(encoding="utf-8"))
+    assert m["probe"]["has_video"] is False and m["probe"]["has_audio"] is True and m["probe"]["width"] == 0
+
+
+def test_the_lecture_hint_reads_the_file_name_and_the_speech_share(tmp_path):
+    talk = [{"start": 0.0, "end": 500.0}]  # someone talking nearly all of 10 minutes
+    h = video2llm.lecture_hint(tmp_path / "K4.mp4", {"duration": 600.0}, talk)
+    assert h["hint"] is True and any("speech 83%" in x for x in h["reasons"]) and any("10:00 long" in x for x in h["reasons"])
+    assert video2llm.lecture_hint(tmp_path / "K4.mp4", {"duration": 600.0}, [{"start": 0.0, "end": 400.0}])["hint"] is False  # 67 %: a film with dialogue
+    h = video2llm.lecture_hint(tmp_path / "premiere-export-tutorial.mp4", {"duration": 600.0}, None)
+    assert h["hint"] is True and any("file name: «tutorial»" in x for x in h["reasons"])
+    assert video2llm.lecture_hint(tmp_path / "beach.mp4", {"duration": 600.0}, None)["hint"] is False
+
+
+def test_a_sound_request_on_a_sound_file_brings_the_tags_and_no_frames(sound):
+    out = sound.with_name("voice memo_frames")
+    m = json.loads((out / "video2llm.json").read_text(encoding="utf-8"))
+    m["transcript"] = []
+    m["sound_spans"] = [{"start": 0.0, "end": 3.0, "threshold": 0.15, "note": "speech is heard in 0% of this moment",
+                         "events": [{"start": 1.0, "end": 1.5, "label": "Slam"}]}]
+    tools = video2llm.Tools(video2llm.find_tool("ffmpeg", None), video2llm.find_tool("ffprobe", None))
+    r = video2llm.sound_check(m, tools, out, video2llm.NAMES["en"], "Video 1", 0.0, 3.0, 0.15,
+                              video2llm.make_progress(True), rerun=video2llm.Rerun("RUN", sound))
+    assert r["frames"] == 0 and not list(out.glob("frames_*/*.jpg"))  # nothing to cut: there is no picture
+    lane = r["path"].read_text(encoding="utf-8")
+    assert 'sound file "voice memo.wav" — sound check of 00:00–00:03' in lane and "a sound file has no picture to show" in lane
+    assert "(sound: Slam)" in lane
+
+def test_a_sound_request_on_a_lecture_still_brings_the_sound_check(clip, tmp_path):
+    # --frames auto picks the lecture lane for a tutorial; a --sounds request must not be answered with that lane
+    w = tmp_path / "howto.mp4"
+    shutil.copy(clip, w)
+    (tmp_path / "howto.info.json").write_text(json.dumps({"title": "Export tutorial", "categories": ["Education"], "language": "en"}), encoding="utf-8")
+    r = run(w, "--no-transcript", "--sounds", "--start", "0:00", "--end", "0:02", "--agent-tool", "video")
+    out = w.with_name("howto_frames")
+    assert "auto: a lecture / tutorial" in r.stderr and "  lecture lane: " not in r.stderr and not (out / "lane_lecture.md").exists()
+    assert "sound" in r.stderr  # the run went on to the sound stage (the model itself may be absent on CI)
