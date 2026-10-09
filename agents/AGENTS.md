@@ -1,31 +1,52 @@
-<!-- video2llm — the one instruction for every agent. Replace /path/to/video2llm.py with where you put the script and keep
-     this section in the file your agent reads: AGENTS.md (Codex CLI, Antigravity, Cursor), CLAUDE.md (Claude Code — or just the
-     line `@agents/AGENTS.md` there), GEMINI.md (Gemini CLI), QWEN.md (Qwen Code). Same text as a skill: SKILL.md; as a Cursor
-     rule: .cursor/rules/video2llm.mdc. -->
+<!-- video2llm — a SECTION to add to the instructions your agent already reads, not a file to replace them: paste it into
+     AGENTS.md (Codex CLI, Antigravity, Cursor), CLAUDE.md (Claude Code — or the line `@agents/AGENTS.md` there), GEMINI.md
+     (Gemini CLI), QWEN.md (Qwen Code), or into the SKILL.md of a skill you already have. Replace /path/to/video2llm.py with
+     where you put the script. The same text as a skill of its own: SKILL.md; as a Cursor rule: .cursor/rules/video2llm.mdc. -->
 
 # Watching a video — video2llm
 
-When the user asks about a video file (mp4, mov, mkv, webm, avi: "what happens here", "describe it",
-"what does she say", "find the moment when…"), do not open the file yourself and do not run ffmpeg —
-run the script and work from what it writes:
+**When:** the user gives a video — a file (mp4, mov, mkv, webm, avi …) or a link to one (YouTube, Vimeo,
+Rutube, VK, TikTok, Twitch, Dailymotion, a direct .mp4 …) — and wants something from it: what happens, what
+is said or shown, a question about it, a summary, notes or a guide of it. Do not open the file or the page
+yourself, do not run ffmpeg or yt-dlp — run the script and work from what it writes:
 
-    python3 /path/to/video2llm.py <video>
+    python3 /path/to/video2llm.py <video file or URL>
 
-It writes `<video>_frames/lane.md` next to the video: the frames at 1 per second as contact sheets
-(3 frames to an image, each frame tagged with its time), the words spoken under each sheet, and a header
-with the rules. Then:
+A link is downloaded once (its captions stand in for speech recognition); the script then **decides by the
+material** which lane to write and says why:
 
-1. Read `lane.md` and open every sheet it links with your file-reading tool — they are images. Look at
-   them; never describe from the transcript alone what you have not seen in the frames. A long video comes
-   in parts: the header says how to get the next one (`--start mm:ss`) — fetch it yourself, no need to ask.
-2. Follow the header. In short: you choose the moments, the user does not know the timecodes. Before
-   every frame-by-frame request (`--frames all --start mm:ss --end mm:ss`) and every sound request
-   (`--sounds --start mm:ss --end mm:ss`) ask the user yes or no, with the token cost the header gives;
-   after the yes run that exact command and read the lane it writes.
-3. Use nothing else on the video: no ffmpeg or ffprobe, no crops, zooms or frame cutting of your own,
-   no reading `video2llm.json` or the single frames — only the images the lanes link to. If a detail is
-   too small to tell, say so.
+- **Footage to watch** (a film, a clip, a vlog, home video) → `<video>_frames/lane.md`: the frames at 1 per
+  second as contact sheets (3 to an image, each tagged with its time), the words spoken under each sheet,
+  a header with the rules.
+- **Something taught, shown or explained** (a lecture, a tutorial, a how-to, a course lesson, a webinar, a
+  talk, a review or breakdown of a tool or a technique) → `lane_lecture.md`: the whole transcript with the
+  chapters and no frames — a talking person is not worth frames; you ask for single larger frames at exactly
+  the moments where the screen matters.
 
-The first run of a video takes 10–20 s (speech recognition), the very first run on a machine also
-downloads the speech model (464 MB) — allow the command a few minutes then. Every later run on the same
-video is under a second. On Windows the command is `python`, not `python3`.
+Then:
+
+1. Read the lane and open every image it links with your file-reading tool. Never describe from the
+   transcript alone what you have not seen. A long overview comes in parts: the header says how to get the
+   next one (`--frames 1 --start mm:ss`) — fetch it yourself.
+2. Follow the header. You choose the moments; the user does not know the timecodes. Before every
+   frame-by-frame request (`--frames all --start mm:ss --end mm:ss`) and every sound request (`--sounds
+   --start mm:ss --end mm:ss`) ask the user yes or no, with the token cost the header gives. In the lecture
+   lane ask for the frames of the moments that matter (`--frames at --times 3:12,7:40`) without asking —
+   any number, 3 or 30. If the overview's words show it is a lecture after all, switch: `--frames none`.
+3. **Notes.** When you have answered about a lecture / tutorial, ask in one line whether to make the
+   Guide (a step-by-step instruction) or the Notes (a talk) of it — never for a film, a clip or a vlog, and
+   never a separate question about a PDF: the page has its own «Download PDF» button. After the yes, write
+   the structure as JSON — `{title, intro, lang, kind: guide | notes, source: {file, title, url},
+   sections: [{heading, text, frames: ["mm:ss"], captions: [...]}]}` — and run
+   `python3 /path/to/video2llm.py guide --spec spec.json`, then `python3 /path/to/video2llm.py link <the
+   folder it printed>`. The page goes to the user's own Neocities site; the first time a page opens on
+   their computer to paste their API key (Neocities: Profile → Settings → Manage Site Settings → API Key) —
+   tell them to look at the browser, never ask for the key in the chat. Give them the address as it is; it
+   is their link for their own use — do not call it publishing.
+4. Use nothing else on the video: no ffmpeg or ffprobe, no crops, zooms or frame cutting of your own, no
+   reading `video2llm.json` or the single frames — only the images the lanes link to. If a detail is too
+   small to tell, say so.
+
+The first run of a video takes 10–20 s (speech recognition) — a link also downloads the video; the very
+first run on a machine downloads the speech model (464 MB) — allow the command a few minutes then. Every
+later run on the same video is under a second. On Windows the command is `python`, not `python3`.

@@ -66,9 +66,9 @@ import urllib.error
 import urllib.request
 import zipfile
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
-VERSION = "0.6.1"
+VERSION = "0.7.0"
 
 # ── constants (same numbers as the Deep Artisan pipeline) ────────────────────────────────────────
 NATIVE_LIMIT_BYTES = 19 * 1024 * 1024  # Gemini request limit 20 MB minus headroom
@@ -1504,8 +1504,8 @@ class Rerun:
     settings (`cmd`); with --agent-tool NAME the header tells an agent harness that runs the script itself
     (Deep Artisan) to call that tool: {"video": …, "what": "next" | "frames" | "sounds", "start", "end"}."""
 
-    def __init__(self, cmd: str, video: Path, tool: Optional[str] = None):
-        self.cmd, self.video, self.tool = cmd, video, tool
+    def __init__(self, cmd: str, video: Path, tool: Optional[str] = None, auto: bool = False):
+        self.cmd, self.video, self.tool, self.auto = cmd, video, tool, auto  # auto: the lane was chosen by --frames auto
 
     def _call(self, what: str, start: str, end: Optional[str] = None) -> str:
         args = {"video": str(self.video), "what": what, "start": start}
@@ -1519,8 +1519,8 @@ class Rerun:
     def sounds(self, start: str = "mm:ss", end: str = "mm:ss") -> str:
         return self._call("sounds", start, end) if self.tool else f"run {self.cmd} --sounds --start {start} --end {end}"
 
-    def next(self, at: float) -> str:
-        return self._call("next", tcode(at)) if self.tool else f"run {self.cmd} --start {tcode(at)}"
+    def next(self, at: float) -> str:  # the next part of the overview must stay the overview — not be decided again
+        return self._call("next", tcode(at)) if self.tool else f"run {self.cmd}{' --frames 1' if self.auto else ''} --start {tcode(at)}"
 
     def at(self, times: Optional[List[str]] = None) -> str:
         """Single frames at the moments named: {what: "at", times: [...]} for the tool, --frames at --times for the command."""
@@ -1528,6 +1528,12 @@ class Rerun:
         if self.tool:
             return f"call {self.tool} with " + json.dumps({"video": str(self.video), "what": "at", "times": ts}, ensure_ascii=False)
         return f"run {self.cmd} --frames at --times {','.join(ts)}"
+
+    def lecture(self) -> str:
+        """The lecture lane of the same video: {what: "lecture"} for the tool, --frames none for the command."""
+        if self.tool:
+            return f"call {self.tool} with " + json.dumps({"video": str(self.video), "what": "lecture"}, ensure_ascii=False)
+        return f"run {self.cmd} --frames none"
 
     def next_file(self, at: float) -> str:
         """"it writes lane_from_mm-ss.md, " for the command; the tool returns the lane itself."""
@@ -1728,6 +1734,12 @@ def lane_blocks(m: Dict[str, Any], label: str, start: float, max_frames: Optiona
                         "more with the cost." if not use_dense else "")
                      + " If a detail is too small to tell, say so.")
         rules.append(rerun.cannot())
+        if not use_dense:
+            rules.append("If the words show that this is something taught, shown or explained — a lecture, a tutorial, a how-to, "
+                         "a course lesson, a webinar, a talk, a review or a breakdown of a tool or a technique — stop reading "
+                         f"frames of a talking person: {rerun.lecture()} gives the LECTURE lane (the whole transcript, no frames, "
+                         "single frames where the screen matters on request) and, after your answer, the question about a "
+                         "Guide / Notes of it. Footage to watch (a film, a clip, a vlog, home video) stays here.")
     else:
         rules.append("Do not cut frames from the video or analyse its sound some other way.")
     cost = ""
@@ -1994,6 +2006,29 @@ def frames_at_blocks(m: Dict[str, Any], label: str, frames: List[Dict[str, Any]]
     return out
 
 
+def document_offer_rule(rerun: Optional["Rerun"]) -> str:
+    """The one question after the answer: a document of this video — PDF, web, both or none. Never «publishing»."""
+    how = (
+        "call the `video_guide` tool with the structure (title, intro, kind, sections: heading, text, the moments mm:ss whose "
+        "frames illustrate it, a caption each) — the host builds the page and returns its address; ask nothing else"
+        if rerun and rerun.tool else
+        "write the spec as JSON ({title, intro, lang, kind, source: {file, title, url}, sections: [{heading, text, frames, captions}]}) "
+        "to a file and run `" + (f"{shell_arg(sys.executable)} {shell_arg(Path(__file__).resolve())}" if rerun else "video2llm")
+        + " guide --spec spec.json`, then `… link <the folder it printed>` — "
+        "the document goes to the user's own Neocities site (free); the first time it opens a page on this computer where they "
+        "sign up and paste their API key (Neocities: Profile → Settings → Manage Site Settings → API Key) — tell them that, "
+        "and never ask for a key in the chat")
+    return ("When you have answered, decide whether this video is MATERIAL TO KEEP — something taught, shown or explained: a "
+            "lecture, a tutorial, a how-to, a walkthrough, a course lesson, a webinar, a talk, a review or a breakdown of a tool "
+            "or a technique, an explainer. Only then ask the user in ONE line whether to make the Guide (a step-by-step "
+            "instruction, kind guide: numbered steps) or the Notes (a talk, kind notes) of it — name the one that fits — yes or "
+            "no; on no, just go on. A film, a clip, a vlog, a sketch, a music video, an ad, a stream of someone playing or "
+            "chatting, home footage: do not offer it at all. It is one page of their own with the frames that matter, at a web "
+            "address, with a «Download PDF» button on it: never ask about a PDF separately. Do not build anything before they "
+            "answer. After it: " + how + ". Never build the page or the "
+            "PDF by hand, and never call this «publishing» — it is the user's link, nothing is announced anywhere.")
+
+
 def lecture_blocks(m: Dict[str, Any], label: str, rerun: Optional["Rerun"] = None) -> List[Dict[str, Any]]:
     """The lecture lane: no frames — the whole transcript with time spans (and the site's chapters), and the
     rules: read it, decide where the SCREEN matters, ask for single frames at exactly those moments."""
@@ -2018,10 +2053,7 @@ def lecture_blocks(m: Dict[str, Any], label: str, rerun: Optional["Rerun"] = Non
         "not needed; no need to ask the user before this — the lecture mode is their choice.",
         "Answer from the words AND the frames: what is said, what is shown, what is written on the screen. When something "
         "is not visible in the frames you got, say so or ask for another moment.",
-        "When you have answered, offer the user a written guide of this video — a summary or a step-by-step instruction "
-        "with those frames as illustrations at the right places — and make it only if they say yes"
-        + (" — with the video_guide tool (it cuts the frames, builds the page and the PDF and files them), not by hand."
-           if rerun and rerun.tool else "."),
+        document_offer_rule(rerun),
     ]
     if p.get("has_audio"):
         rules.append("Sounds other than speech, or every frame of a short moment, are available as for any video: ask the user "
@@ -2648,7 +2680,735 @@ def ask(provider: str, body: Dict[str, Any], model: str) -> str:
 
 
 # ── CLI ──────────────────────────────────────────────────────────────────────────────────────────
+# ───────────────────────────── guide: an illustrated page and a PDF from a spec ─────────────────────────────
+# `video2llm guide --spec guide.json [--out DIR] [--pdf] [--json]`
+# The model writes the spec (title, intro, sections with a heading, the text and the moments whose frames
+# illustrate them); this builds <out>/index.html + img/ — one page, the frames open full screen on a click — and a PDF
+# when asked, printed by a Chrome / Chromium / Edge / Brave already on the computer. Nothing is uploaded here;
+# `video2llm link` does that, only when the user asked for a web address.
+GUIDE_HOME = "guides"                # ~/.cache/video2llm/guides/<title>/ — where a document is built by default (--out to choose)
+GUIDE_MAX_FRAMES = 60
+REPO_URL = "https://github.com/Immersive-Media-Technologies/video-to-llm-imt"
+TERMS_URL = REPO_URL + "/blob/main/TERMS.md"
+
+_TIME_RE = re.compile(r"^\d{1,2}(?::\d\d){1,2}(?:\.\d{1,2})?$")
+_INLINE_B = re.compile(r"\*\*([^*]+)\*\*")
+_INLINE_C = re.compile(r"`([^`]+)`")
+_LIST_RE = re.compile(r"^\s*(?:[-*•]\s+|(\d+)[.)]\s+)(.*)$")
+
+
+def esc_html(s: str) -> str:
+    return (s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;"))
+
+
+def _inline(t: str) -> str:
+    return _INLINE_C.sub(r"<code>\1</code>", _INLINE_B.sub(r"<b>\1</b>", esc_html(t)))
+
+
+def guide_text_html(text: str) -> str:
+    """The smallest markdown: paragraphs, `- ` and `1. ` lists, **bold**, `code`."""
+    out: List[str] = []
+    lst: Optional[Dict[str, Any]] = None
+
+    def flush() -> None:
+        nonlocal lst
+        if lst:
+            out.append(f"<{lst['kind']}>" + "".join(f"<li>{i}</li>" for i in lst["items"]) + f"</{lst['kind']}>")
+            lst = None
+
+    for para in re.split(r"\n{2,}", text.replace("\r\n", "\n")):
+        for line in para.split("\n"):
+            m = _LIST_RE.match(line)
+            if m:
+                kind = "ol" if m.group(1) else "ul"
+                if not lst or lst["kind"] != kind:
+                    flush()
+                    lst = {"kind": kind, "items": []}
+                lst["items"].append(_inline(m.group(2)))
+            elif line.strip():
+                flush()
+                out.append(f"<p>{_inline(line.strip())}</p>")
+        flush()
+    return "\n".join(out)
+
+
+def guide_slug(title: str) -> str:
+    t = re.sub(r"\s+", " ", re.sub(r'[\\/:*?"<>|]+', " ", title.strip())).strip()
+    return (t or "guide")[:80]
+
+
+def web_slug(title: str) -> str:
+    """ASCII folder name for a web address: letters, digits, dashes; Cyrillic transliterated the simple way."""
+    tr = dict(zip("абвгдеёжзийклмнопрстуфхцчшщъыьэюя",
+                  ["a", "b", "v", "g", "d", "e", "yo", "zh", "z", "i", "y", "k", "l", "m", "n", "o", "p", "r", "s", "t", "u",
+                   "f", "h", "ts", "ch", "sh", "sch", "", "y", "", "e", "yu", "ya"]))
+    s = "".join(tr.get(c, c) for c in title.lower())
+    s = re.sub(r"[^a-z0-9]+", "-", s).strip("-")
+    return s[:60] or "guide"
+
+
+IMT_LOGO_PNG = "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"  # the white «imt» mark, 79×40, for the footer (inverted on a light page)
+
+
+def guide_html(spec: Dict[str, Any], sections: List[Dict[str, Any]], *, pdf_name: Optional[str], duration: Optional[float] = None) -> str:
+    """The page: one column, the frames as figures with a timecode chip, a lightbox on click, a tight print layout.
+    kind «guide» (a sequence of steps) numbers the sections on the left margin; «notes» (a talk) does not."""
+    lang = spec.get("lang") or "en"
+    ru = lang.lower().startswith("ru")
+    title, intro, src = spec["title"], spec.get("intro") or "", spec.get("source") or {}
+    brand = spec.get("brand") or "Immersive Media Technologies"
+    kind = spec.get("kind") or "guide"
+    made = ("Сделано с V2L-IMT" if ru else "Made with V2L-IMT")
+    t_src, t_terms, t_contents, t_pdf, t_close = (("Источник", "условия", "Содержание", "Скачать PDF", "Закрыть") if ru
+                                                   else ("Source", "terms", "Contents", "Download PDF", "Close"))
+    meta = []
+    if src.get("title") or src.get("url"):
+        name = esc_html(src.get("title") or src.get("url"))
+        meta.append(f'<span>{t_src}: ' + (f'<a href="{esc_html(src["url"])}">{name}</a>' if src.get("url") else name) + "</span>")
+    if duration:
+        meta.append(f'<span class="tc">{esc_html(tcode(duration))}</span>')
+    # the PDF is made by the reader's browser (print → save as PDF, into their downloads folder); a file printed with
+    # --pdf is linked instead
+    meta.append(f'<a class="pdf" href="{esc_html(pdf_name)}" download>{t_pdf}</a>' if pdf_name
+                else f'<button class="pdf" type="button" onclick="window.print()">{t_pdf}</button>')
+    def heading(s: Dict[str, Any]) -> str:  # a guide numbers its steps itself — a «1.» the model put in front is dropped
+        h = s["heading"]
+        return re.sub(r"^\s*\d{1,2}\s*[.)]\s+", "", h) if kind == "guide" else h
+    toc = ""
+    if len(sections) >= 4:
+        toc = f'<nav class="toc"><p>{t_contents}</p><ol>' + "".join(
+            f'<li><a href="#s{i}">{esc_html(heading(s))}</a></li>' for i, s in enumerate(sections, 1)) + "</ol></nav>"
+    body = []
+    n = 0
+    for i, s in enumerate(sections, 1):
+        figs = ""
+        if s["images"]:
+            cells = []
+            for im in s["images"]:
+                n += 1
+                cap = esc_html(im["caption"]) if im.get("caption") else ""
+                cells.append(f'<figure><a href="{esc_html(im["src"])}" data-i="{n}" data-cap="{cap}" data-t="{esc_html(im["time"])}">'
+                             f'<img src="{esc_html(im["src"])}" alt="{cap or esc_html(im["time"])}" loading="lazy"><span class="tc">{esc_html(im["time"])}</span></a>'
+                             + (f"<figcaption>{cap}</figcaption>" if cap else "") + "</figure>")
+            figs = f'<div class="figs n{min(len(cells), 3)}">' + "".join(cells) + "</div>"
+        num = f'<span class="num" aria-hidden="true">{i}.</span>' if kind == "guide" else ""
+        body.append(f'<section id="s{i}">\n<h2>{num}{esc_html(heading(s))}</h2>\n{guide_text_html(s["text"])}\n{figs}\n</section>')
+    foot = (f'<a href="{REPO_URL}">{made}</a> · <img class="imt" src="data:image/png;base64,{IMT_LOGO_PNG}" alt="" width="40" height="20">'
+            f'{esc_html(brand)} · <a href="{TERMS_URL}">{t_terms[0].upper() + t_terms[1:]}</a>')
+    return f"""<!doctype html>
+<html lang="{esc_html(lang)}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex"><title>{esc_html(title)}</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@500&display=swap">
+<style>
+:root{{--paper:#fbfbfa;--ink:#1c1d21;--ink2:#5c5f66;--rule:#e4e4e2;--acc:#b8780f;--pdf:#008080;--chip:#111214;--chipink:#f2d38a;--code:#f0efeb}}
+@media (prefers-color-scheme: dark){{:root:not([data-theme=light]){{--paper:#131417;--ink:#ececea;--ink2:#9a9ca3;--rule:#2a2b30;--acc:#e3b04b;--pdf:#008080;--chip:#0a0a0b;--chipink:#f2d38a;--code:#1e1f24}}}}
+*{{box-sizing:border-box}}html{{-webkit-text-size-adjust:100%}}
+body{{margin:0;background:var(--paper);color:var(--ink);font:17px/1.6 "IBM Plex Sans",ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;font-feature-settings:"ss01"}}
+main{{max-width:46rem;margin:0 auto;padding:3.5rem 1.25rem 5rem}}
+header h1{{font-size:clamp(2.3rem,6vw,3.3rem);line-height:1.1;font-weight:600;letter-spacing:-.015em;margin:0 0 .9rem}}
+.meta{{display:flex;flex-wrap:wrap;gap:.35rem 1.1rem;color:var(--ink2);font-size:.9rem;margin:0 0 2rem}}
+.meta a,.meta .pdf{{color:var(--acc);text-decoration:none;border:0;border-bottom:1px solid transparent;background:none;padding:0;font:inherit;cursor:pointer}}.meta a:hover{{border-color:var(--acc)}}.meta .pdf{{color:var(--pdf)}}.meta .pdf:hover{{border-color:var(--pdf)}}.meta .pdf:focus-visible{{outline:2px solid var(--acc);outline-offset:3px}}
+.tc{{font:500 .78rem/1 "IBM Plex Mono",ui-monospace,SFMono-Regular,Menlo,monospace;letter-spacing:.02em;font-variant-numeric:tabular-nums}}
+.meta .tc{{align-self:center;padding:.2rem .45rem;border:1px solid var(--rule);border-radius:4px}}
+.lead{{font-size:1.1rem;line-height:1.55;color:var(--ink);margin:0 0 2rem}}.lead p{{margin:0 0 .75rem}}
+.toc{{margin:0 0 2.5rem;padding:.2rem 0 .2rem 1.1rem;border-left:3px solid var(--acc);font-size:.95rem}}
+.toc p{{margin:0 0 .4rem;color:var(--ink2)}}.toc ol{{margin:0;padding-left:1.4rem;color:var(--ink)}}.toc li{{margin:.15rem 0}}.toc a{{color:inherit;text-decoration:none}}.toc li:hover{{color:var(--acc)}}
+section{{position:relative;margin:2.75rem 0 0;padding-top:1.5rem;border-top:1px solid var(--rule)}}
+h2{{font-size:1.35rem;line-height:1.3;font-weight:600;margin:0 0 .75rem;letter-spacing:-.005em}}
+.num{{display:inline-block;width:2.6rem;margin-left:-2.6rem;color:var(--acc);font-variant-numeric:tabular-nums}}
+@media (max-width:52rem){{.num{{width:auto;margin:0 .5rem 0 0}}}}
+p{{margin:0 0 .9rem}}ul,ol{{margin:0 0 .9rem;padding-left:1.4rem}}li{{margin:.2rem 0}}
+code{{font:.88em "IBM Plex Mono",ui-monospace,monospace;background:var(--code);padding:.08em .35em;border-radius:4px}}
+.figs{{display:grid;gap:1rem;margin:1.25rem 0 .5rem}}.figs.n2,.figs.n3{{grid-template-columns:1fr 1fr}}
+@media (max-width:40rem){{.figs.n2,.figs.n3{{grid-template-columns:1fr}}}}
+figure{{margin:0}}figure a{{position:relative;display:block;border-radius:8px;overflow:hidden;background:#000;outline:none}}
+figure a:focus-visible{{box-shadow:0 0 0 3px var(--acc)}}
+figure img{{display:block;width:100%;height:auto;cursor:zoom-in}}
+figure .tc{{position:absolute;left:.5rem;bottom:.5rem;padding:.3rem .45rem;border-radius:4px;background:var(--chip);color:var(--chipink)}}
+figcaption{{font-size:.9rem;line-height:1.45;color:var(--ink2);margin:.45rem .1rem 0}}
+footer{{margin-top:4rem;padding-top:1rem;border-top:1px solid var(--rule);color:var(--ink2);font-size:.82rem}}footer a{{color:var(--ink2)}}
+footer .imt{{height:.95em;width:auto;vertical-align:-.12em;margin-right:.35em;opacity:.85}}@media (prefers-color-scheme: light){{:root:not([data-theme=dark]) footer .imt{{filter:invert(1)}}}}
+/* lightbox */
+.lb{{position:fixed;inset:0;background:rgba(8,8,10,.94);display:none;z-index:9;flex-direction:column;align-items:center;justify-content:center;padding:3.5rem 1rem 2.5rem}}
+.lb.on{{display:flex}}.lb img{{max-width:100%;max-height:calc(100vh - 7.5rem);object-fit:contain;border-radius:4px;box-shadow:0 20px 60px rgba(0,0,0,.6)}}
+.lb .cap{{margin-top:.9rem;color:#d9d9d6;font-size:.95rem;text-align:center;max-width:60rem}}.lb .cap .tc{{color:var(--chipink);margin-right:.6rem}}
+.lb button{{position:absolute;background:none;border:0;color:#fff;cursor:pointer;font:400 2.2rem/1 "IBM Plex Sans",sans-serif;padding:.4rem .7rem;border-radius:8px;opacity:.75}}
+.lb button:hover,.lb button:focus-visible{{opacity:1;background:rgba(255,255,255,.1);outline:none}}
+.lb .x{{top:.6rem;right:.9rem}}.lb .p{{left:.4rem;top:50%;transform:translateY(-50%)}}.lb .n{{right:.4rem;top:50%;transform:translateY(-50%)}}
+@media (max-width:40rem){{.lb .p,.lb .n{{display:none}}}}
+@media (prefers-reduced-motion:no-preference){{.lb img{{animation:lbin .18s ease-out}}@keyframes lbin{{from{{opacity:0;transform:scale(.97)}}to{{opacity:1;transform:none}}}}}}
+/* print: tight — 11pt, two frames to a row, a frame no taller than a third of the page */
+@page{{size:A4;margin:12mm}}
+@media print{{body{{background:#fff;color:#1c1d21;font-size:11pt;line-height:1.4}}main{{padding:0;max-width:none}}.toc,.pdf,.lb{{display:none!important}}
+header h1{{font-size:22pt;margin-bottom:4pt}}.meta{{font-size:9pt;margin-bottom:10pt}}.lead{{font-size:11pt;margin-bottom:10pt}}
+section{{margin-top:12pt;padding-top:8pt;break-inside:auto}}h2{{font-size:14pt;margin-bottom:6pt;break-after:avoid}}.num{{width:auto;margin:0 .4em 0 0}}
+p,ul,ol{{margin-bottom:6pt}}.figs{{display:grid;grid-template-columns:1fr 1fr;gap:5mm;margin:6pt 0 8pt}}.figs.n1{{grid-template-columns:1fr}}.figs.n1 a{{max-width:80%;margin:0 auto}}
+figure{{break-inside:avoid}}figure a{{border-radius:3px}}figure img{{max-height:62mm;width:auto;max-width:100%;margin:0 auto}}figure .tc{{font-size:7.5pt}}figcaption{{font-size:8.5pt;margin-top:3pt;text-align:center}}
+footer{{margin-top:14pt;font-size:8pt}}footer .imt{{filter:invert(1)}}}}
+</style></head><body><main>
+<header><h1>{esc_html(title)}</h1>{f'<p class="meta">{" ".join(meta)}</p>' if meta else ""}</header>
+{f'<div class="lead">{guide_text_html(intro)}</div>' if intro else ""}
+{toc}
+{chr(10).join(body)}
+<footer>{foot}</footer>
+</main>
+<div class="lb" id="lb" role="dialog" aria-modal="true" aria-label="{esc_html(title)}"><button class="x" aria-label="{t_close}">×</button><button class="p" aria-label="‹">‹</button><button class="n" aria-label="›">›</button><img alt=""><p class="cap"></p></div>
+<script>
+(function(){{var L=[].slice.call(document.querySelectorAll('figure a')),lb=document.getElementById('lb'),im=lb.querySelector('img'),cap=lb.querySelector('.cap'),k=-1,last=null;
+function show(i){{k=(i+L.length)%L.length;var a=L[k];im.src=a.getAttribute('href');im.alt=a.dataset.cap||a.dataset.t;
+cap.innerHTML='<span class="tc">'+a.dataset.t+'</span>'+(a.dataset.cap||'');lb.classList.add('on');document.body.style.overflow='hidden';lb.querySelector('.x').focus();}}
+function hide(){{lb.classList.remove('on');document.body.style.overflow='';im.src='';if(last)last.focus();}}
+L.forEach(function(a,i){{a.addEventListener('click',function(e){{e.preventDefault();last=a;show(i);}});}});
+lb.querySelector('.x').onclick=hide;lb.querySelector('.p').onclick=function(e){{e.stopPropagation();show(k-1);}};lb.querySelector('.n').onclick=function(e){{e.stopPropagation();show(k+1);}};
+lb.addEventListener('click',function(e){{if(e.target===lb||e.target===im)hide();}});
+document.addEventListener('keydown',function(e){{if(!lb.classList.contains('on'))return;if(e.key==='Escape')hide();else if(e.key==='ArrowLeft')show(k-1);else if(e.key==='ArrowRight')show(k+1);}});}})();
+</script></body></html>
+"""
+
+
+def find_browser(override: Optional[str] = None) -> Optional[str]:
+    """A Chromium-family browser that can print a page to PDF: Chrome, Chromium, Edge, Brave (env VIDEO2LLM_BROWSER first)."""
+    cand: List[str] = [x for x in [override, os.environ.get("VIDEO2LLM_BROWSER")] if x]
+    if sys.platform == "darwin":
+        for app, exe in (("Google Chrome", "Google Chrome"), ("Chromium", "Chromium"), ("Microsoft Edge", "Microsoft Edge"),
+                         ("Brave Browser", "Brave Browser"), ("Arc", "Arc"), ("Vivaldi", "Vivaldi")):
+            for root in ("/Applications", str(Path.home() / "Applications")):
+                cand.append(f"{root}/{app}.app/Contents/MacOS/{exe}")
+    elif os.name == "nt":
+        for root in (os.environ.get("ProgramFiles"), os.environ.get("ProgramFiles(x86)"), os.environ.get("LOCALAPPDATA")):
+            if root:
+                cand += [rf"{root}\Google\Chrome\Application\chrome.exe", rf"{root}\Microsoft\Edge\Application\msedge.exe",
+                         rf"{root}\BraveSoftware\Brave-Browser\Application\brave.exe", rf"{root}\Chromium\Application\chrome.exe"]
+    for name in ("google-chrome", "google-chrome-stable", "chromium", "chromium-browser", "microsoft-edge", "brave-browser", "chrome", "msedge"):
+        w = shutil.which(name)
+        if w:
+            cand.append(w)
+    for c in cand:
+        if c and Path(c).is_file():
+            return c
+    return None
+
+
+def html_to_pdf(html: Path, pdf: Path, browser: Optional[str] = None) -> bool:
+    exe = find_browser(browser)
+    if not exe:
+        return False
+    tmp_profile = Path(tempfile.mkdtemp(prefix="v2l-pdf-"))
+    try:
+        r = run([exe, "--headless=new", "--disable-gpu", "--no-first-run", "--no-default-browser-check",
+                 f"--user-data-dir={tmp_profile}", "--no-pdf-header-footer", "--run-all-compositor-stages-before-draw",
+                 "--virtual-time-budget=4000", f"--print-to-pdf={pdf}", html.resolve().as_uri()])
+        return r.returncode == 0 and pdf.is_file() and pdf.stat().st_size > 1000
+    finally:
+        shutil.rmtree(tmp_profile, ignore_errors=True)
+
+
+def guide_default_out(title: str) -> Path:
+    return cache_dir() / GUIDE_HOME / guide_slug(title)
+
+
+def guide_main(argv: List[str]) -> None:
+    ap = argparse.ArgumentParser(prog="video2llm guide",
+                                 description="An illustrated document of a video from a spec the model wrote: index.html + img/ — "
+                                             "one page, the frames open full screen on a click (+ a PDF with --pdf, printed by the "
+                                             "Chrome / Chromium / Edge / Brave on this computer). Nothing is uploaded — see `video2llm link`.")
+    ap.add_argument("--spec", required=True, help="JSON: {title, intro?, lang?, kind?: guide | notes (guide numbers the sections), "
+                                                  "source: {file, title?, url?}, brand?, sections: [{heading, text, frames?: [mm:ss…], captions?: […]}]}")
+    ap.add_argument("--out", help="output folder (default: the user cache, video2llm/guides/<title>/)")
+    ap.add_argument("--pdf", action="store_true", help="also print <title>.pdf here (needs a Chromium-family browser); without it the page's "
+                                                   "«Download PDF» button prints through the reader's own browser")
+    ap.add_argument("--browser", help="the browser executable for the PDF (default: found; env VIDEO2LLM_BROWSER)")
+    ap.add_argument("--ffmpeg", help="path to ffmpeg")
+    ap.add_argument("--json", action="store_true", help="print {dir, html, pdf, frames} as JSON")
+    ap.add_argument("--quiet", action="store_true")
+    a = ap.parse_args(argv)
+    try:
+        spec = json.loads(Path(a.spec).read_text(encoding="utf-8"))
+    except (OSError, ValueError) as e:
+        sys.exit(f"--spec: {e}")
+    title = str(spec.get("title") or "").strip()
+    secs = spec.get("sections")
+    if not title or not isinstance(secs, list) or not secs:
+        sys.exit("--spec: title and a non-empty sections list are required")
+    src = spec.get("source") or {}
+    video = Path(str(src.get("file") or "")).expanduser()
+    progress = make_progress(a.quiet)
+    times: List[str] = []
+    for s in secs:
+        if not isinstance(s, dict) or not str(s.get("heading") or "").strip() or not isinstance(s.get("text"), str):
+            sys.exit("--spec: every section needs a heading and a text")
+        for x in s.get("frames") or []:
+            x = str(x).strip()
+            if not _TIME_RE.match(x):
+                sys.exit(f"--spec: frames: {x} — moments are mm:ss or mm:ss.cc")
+            if x not in times:
+                times.append(x)
+    if len(times) > GUIDE_MAX_FRAMES:
+        sys.exit(f"--spec: up to {GUIDE_MAX_FRAMES} frames in one document")
+    if times and not video.is_file():
+        sys.exit(f"--spec: source.file is not a video file: {video}")
+    out_dir = Path(a.out).expanduser().resolve() if a.out else guide_default_out(title)
+    (out_dir / "img").mkdir(parents=True, exist_ok=True)
+    if not writable_dir(out_dir):
+        sys.exit(f"cannot write to {out_dir}")
+    # the frames: cut once, 1024px on the long side, into img/mm-ss.cc.jpg (a frame cut earlier for `--frames at` is reused)
+    files: Dict[str, Path] = {}
+    if times:
+        ffmpeg = find_tool("ffmpeg", a.ffmpeg)
+        at_dir = video.with_name(f"{video.stem}_frames") / NAMES["en"]["at"].format(w=AT_WIDTH)
+        at_dir_ru = video.with_name(f"{video.stem}_frames") / NAMES["ru"]["at"].format(w=AT_WIDTH)
+        for i, x in enumerate(times):
+            t = parse_tcode(x)
+            name = f"{fmt_t(math.floor(t))}.{int(round((t % 1) * 100)):02d}.jpg"
+            dest = out_dir / "img" / name
+            if not dest.is_file():
+                ready = next((d / name for d in (at_dir, at_dir_ru) if (d / name).is_file()), None)
+                if ready:
+                    shutil.copyfile(ready, dest)
+                else:
+                    r = run([ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-ss", f"{t:.3f}", "-i", str(video),
+                             "-frames:v", "1", "-vf", fit_filter(AT_WIDTH), "-q:v", "3", str(dest)])
+                    if r.returncode != 0 or not dest.is_file():
+                        log(f"  frame at {x}: ffmpeg failed")
+                        continue
+            files[x] = dest
+            progress("frames", int((i + 1) / len(times) * 100))
+    sections: List[Dict[str, Any]] = []
+    for s in secs:
+        images = []
+        caps = s.get("captions") or []
+        for i, x in enumerate(s.get("frames") or []):
+            x = str(x).strip()
+            if x in files:
+                images.append({"src": f"img/{files[x].name}", "time": x, "caption": str(caps[i]) if i < len(caps) and caps[i] else None})
+        sections.append({"heading": str(s["heading"]).strip(), "text": s["text"], "images": images})
+    if not src.get("title") and video.is_file():
+        info = read_info_json(video)
+        src = {**src, "title": info.get("title") or video.name, "url": src.get("url") or info.get("webpage_url")}
+        spec["source"] = src
+    pdf_name = f"{guide_slug(title)}.pdf" if a.pdf else None
+    duration: Optional[float] = None
+    if video.is_file():
+        try:
+            r = run([find_tool("ffprobe", None), "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", str(video)])
+            duration = float((r.stdout or "").strip() or 0) or None
+        except (OSError, ValueError, SystemExit):
+            duration = float(read_info_json(video).get("duration") or 0) or None
+    html_path = out_dir / "index.html"
+    html_path.write_text(guide_html(spec, sections, pdf_name=pdf_name, duration=duration), encoding="utf-8")
+    result: Dict[str, Any] = {"dir": str(out_dir), "html": str(html_path), "frames": len(files), "sections": len(sections)}
+    log(f"video2llm {VERSION} — guide «{title}»: {len(sections)} section(s), {len(files)} frame(s)")
+    log(f"  wrote {html_path}")
+    if a.pdf:
+        pp = out_dir / pdf_name
+        if html_to_pdf(html_path, pp, a.browser):
+            result["pdf"] = str(pp)
+            log(f"  wrote {pp} ({pp.stat().st_size / 1e6:.1f} MB)")
+        else:
+            result["pdf"] = None
+            result["pdf_note"] = "no Chrome / Chromium / Edge / Brave found to print the PDF — install one or pass --browser"
+            log("  PDF skipped: " + result["pdf_note"])
+    if a.json:
+        print(json.dumps(result, ensure_ascii=False), flush=True)
+
+
+# ───────────────────────────── link: a web address for the document, the user's own ─────────────────────────────
+# `video2llm link DIR [--github] [--json]`
+# The document goes to the user's own Neocities site (free: 1 GB, HTML / images / PDF allowed; a site lives as long as
+# the account): sign-up takes a minute in the browser, the API key is pasted once into a small local page this script
+# opens (http://127.0.0.1:…) — never into a chat — and is kept in ~/.config/video2llm/. --github instead: the user's
+# GitHub Pages (gh when logged in, else a saved token, else the device flow — a link and a code, the sign-in happens in
+# the browser). The address is the user's, for their own use; this script never calls it publishing.
+NEOCITIES_API = "https://neocities.org/api"
+GITHUB_API = "https://api.github.com"
+GITHUB_CLIENT_ID = os.environ.get("VIDEO2LLM_GITHUB_CLIENT_ID", "")  # IMT's OAuth app (device flow); gh stands in when present
+GITHUB_REPO_NAME = "v2l-guides"
+LINK_EXCLUDE = {".DS_Store", "Thumbs.db"}
+KEY_WAIT_SEC = 15 * 60
+
+
+def config_dir() -> Path:
+    base = Path(os.environ.get("APPDATA", Path.home() / ".config")) if os.name == "nt" else Path.home() / ".config"
+    d = base / "video2llm"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _http(method: str, url: str, *, data: Optional[bytes] = None, headers: Optional[Dict[str, str]] = None,
+          timeout: float = 60) -> Tuple[int, bytes, Dict[str, str]]:
+    req = urllib.request.Request(url, data=data, method=method, headers={"User-Agent": f"video2llm/{VERSION}", **(headers or {})})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return r.status, r.read(), dict(r.headers)
+    except urllib.error.HTTPError as e:
+        return e.code, e.read(), dict(e.headers)
+
+
+def _json(method: str, url: str, body: Optional[Dict[str, Any]] = None, headers: Optional[Dict[str, str]] = None,
+          timeout: float = 60) -> Tuple[int, Any]:
+    h = {"Accept": "application/json", **(headers or {})}
+    data = None
+    if body is not None:
+        h["Content-Type"] = "application/json"
+        data = json.dumps(body).encode()
+    st, raw, _ = _http(method, url, data=data, headers=h, timeout=timeout)
+    try:
+        return st, json.loads(raw.decode("utf-8", "replace")) if raw else {}
+    except ValueError:
+        return st, {"raw": raw[:300].decode("utf-8", "replace")}
+
+
+def link_files(folder: Path) -> List[Tuple[str, Path]]:
+    out = []
+    for p in sorted(folder.rglob("*")):
+        if p.is_file() and p.name not in LINK_EXCLUDE and not p.name.startswith("."):
+            out.append((p.relative_to(folder).as_posix(), p))
+    return out
+
+
+def links_log(entry: Dict[str, Any]) -> None:
+    """Every address this computer made, in ~/.config/video2llm/links.json."""
+    f = config_dir() / "links.json"
+    try:
+        rows = json.loads(f.read_text(encoding="utf-8")) if f.is_file() else []
+    except (OSError, ValueError):
+        rows = []
+    rows.append({"at": time.strftime("%Y-%m-%d %H:%M"), **entry})
+    f.write_text(json.dumps(rows, ensure_ascii=False, indent=1), encoding="utf-8")
+
+
+def _secret_file(name: str) -> Path:
+    return config_dir() / name
+
+
+def _read_secret(name: str) -> Optional[str]:
+    try:
+        v = _secret_file(name).read_text(encoding="utf-8").strip()
+        return v or None
+    except OSError:
+        return None
+
+
+def _write_secret(name: str, value: str) -> None:
+    f = _secret_file(name)
+    f.write_text(value.strip() + "\n", encoding="utf-8")
+    try:
+        os.chmod(f, 0o600)
+    except OSError:
+        pass
+
+
+def ask_key_in_browser(service: str, steps: List[str], check: Callable[[str], Optional[str]], where: str = "") -> str:
+    """A key is pasted into a page on this computer (http://127.0.0.1:<port>/), never into a chat: the page shows the
+    steps, takes the key, `check` verifies it (returns an error text or None) and it is saved by the caller."""
+    import http.server, socketserver, threading, webbrowser, urllib.parse
+    result: Dict[str, Any] = {}
+    page = ("<!doctype html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>"
+            f"<title>{esc_html(service)} — V2L-IMT</title><style>body{{font:16px/1.5 -apple-system,Segoe UI,Roboto,sans-serif;max-width:560px;"
+            "margin:48px auto;padding:0 24px;background:#141416;color:#eee}a{color:#e0a03c}input{width:100%;font:16px monospace;padding:10px;"
+            "border-radius:8px;border:1px solid #444;background:#1e1e22;color:#eee}button{margin-top:12px;font:16px -apple-system,sans-serif;"
+            "padding:10px 18px;border-radius:8px;border:0;background:#e0a03c;color:#111}ol li{margin:6px 0}.err{color:#f66}</style></head><body>"
+            f"<h2>{esc_html(service)}</h2><ol>" + "".join(f"<li>{s}</li>" for s in steps) + "</ol>"
+            "<form method='post'><input name='key' placeholder='API key' autofocus autocomplete='off'><button>Save on this computer</button></form>"
+            "{err}<p style='color:#888;font-size:13px'>The key stays in ~/.config/video2llm/ on this computer — it is not sent anywhere else.</p></body></html>")
+
+    class H(http.server.BaseHTTPRequestHandler):
+        def log_message(self, *_: Any) -> None:
+            pass
+
+        def _send(self, body: str, code: int = 200) -> None:
+            data = body.encode("utf-8")
+            self.send_response(code); self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(data))); self.end_headers(); self.wfile.write(data)
+
+        def do_GET(self) -> None:
+            self._send(page.replace("{err}", ""))
+
+        def do_POST(self) -> None:
+            n = int(self.headers.get("Content-Length") or 0)
+            form = urllib.parse.parse_qs(self.rfile.read(n).decode("utf-8", "replace"))
+            key = (form.get("key") or [""])[0].strip()
+            err = check(key) if key else "no key"
+            if err:
+                self._send(page.replace("{err}", f"<p class='err'>{esc_html(err)}</p>"))
+                return
+            result["key"] = key
+            self._send("<!doctype html><html><body style='font:16px -apple-system,sans-serif;background:#141416;color:#eee;padding:48px'>"
+                       "<h2>Saved. You can close this tab and go back.</h2></body></html>")
+
+    with socketserver.TCPServer(("127.0.0.1", 0), H) as srv:
+        port = srv.server_address[1]
+        url = f"http://127.0.0.1:{port}/"
+        th = threading.Thread(target=srv.serve_forever, daemon=True); th.start()
+        print(f"\n{service}: open {url} in your browser, follow the steps there and paste the key"
+              + (f" — {where}" if where else "") + " (waits up to 15 minutes)\n", flush=True)
+        try:
+            webbrowser.open(url)
+        except Exception:  # noqa: BLE001
+            pass
+        deadline = time.time() + KEY_WAIT_SEC
+        while "key" not in result and time.time() < deadline:
+            time.sleep(0.5)
+        srv.shutdown()
+    if "key" not in result:
+        raise RuntimeError(f"{service}: the key was not entered in time — run the command again")
+    return result["key"]
+
+
+def _multipart(parts: List[Tuple[str, str, bytes]]) -> Tuple[bytes, str]:
+    import mimetypes, uuid
+    bnd = "----v2l" + uuid.uuid4().hex
+    buf = bytearray()
+    for name, filename, data in parts:
+        ctype = mimetypes.guess_type(filename)[0] or "application/octet-stream"
+        buf += (f"--{bnd}\r\nContent-Disposition: form-data; name=\"{name}\"; filename=\"{filename}\"\r\n"
+                f"Content-Type: {ctype}\r\n\r\n").encode()
+        buf += data + b"\r\n"
+    buf += f"--{bnd}--\r\n".encode()
+    return bytes(buf), f"multipart/form-data; boundary={bnd}"
+
+
+def neocities_check(key: str) -> Optional[str]:
+    st, d = _json("GET", f"{NEOCITIES_API}/info", None, {"Authorization": f"Bearer {key}"})
+    return None if st == 200 and d.get("result") == "success" else "Neocities did not accept this key"
+
+
+def neocities_key() -> Tuple[str, str]:
+    """The saved key, or the one the user pastes into the local page; returns (key, sitename)."""
+    key = _read_secret("neocities.key")
+    if key and neocities_check(key) is None:
+        pass
+    else:
+        key = ask_key_in_browser("Neocities", [
+            "<a href='https://neocities.org/signup' target='_blank'>Sign up</a> (a minute: a site name, a password, an e-mail) — "
+            "or <a href='https://neocities.org/signin' target='_blank'>sign in</a> if you have a site",
+            "The key: <b>Profile</b> (top right) → <a href='https://neocities.org/settings' target='_blank'>Settings</a> → your site → "
+            "<b>Manage Site Settings</b> → <b>API Key</b> → Generate",
+            "Paste it below"], neocities_check, where="the key is in Neocities: Profile → Settings → Manage Site Settings → API Key")
+        _write_secret("neocities.key", key)
+    st, d = _json("GET", f"{NEOCITIES_API}/info", None, {"Authorization": f"Bearer {key}"})
+    return key, str((d.get("info") or {}).get("sitename") or "")
+
+
+def neocities_link(folder: Path, slug: str, progress: Progress, title: str = "") -> Dict[str, Any]:
+    key, sitename = neocities_key()
+    if not sitename:
+        raise RuntimeError("neocities: the site name is unknown — check the key in Settings")
+    files = link_files(folder)
+    batch: List[Tuple[str, str, bytes]] = []
+    size = 0
+    sent = 0
+
+    def flush() -> None:
+        nonlocal batch, size
+        if not batch:
+            return
+        body, ctype = _multipart(batch)
+        st, raw, _ = _http("POST", f"{NEOCITIES_API}/upload", data=body,
+                           headers={"Authorization": f"Bearer {key}", "Content-Type": ctype}, timeout=300)
+        try:
+            d = json.loads(raw.decode("utf-8", "replace"))
+        except ValueError:
+            d = {}
+        if st != 200 or d.get("result") != "success":
+            raise RuntimeError(f"neocities: upload failed ({st}: {d.get('message') or raw[:200].decode('utf-8', 'replace')})")
+        batch, size = [], 0
+
+    for i, (rel, p) in enumerate(files):
+        data = p.read_bytes()
+        if size + len(data) > 60 * 1024 * 1024:  # the request limit is 100 MB
+            flush()
+        batch.append((f"{slug}/{rel}", p.name, data)); size += len(data); sent += 1
+        progress("upload", int((i + 1) / len(files) * 100))
+    flush()
+    url = f"https://{sitename}.neocities.org/{slug}/"
+    out = {"provider": "neocities", "url": url, "site": f"https://{sitename}.neocities.org/", "files": sent,
+           "note": "the address works at once; it stays as long as the Neocities account does"}
+    links_log({"kind": "neocities", **out, "dir": str(folder)})
+    return out
+
+
+# — GitHub —
+def _gh_cli_token() -> Optional[str]:
+    gh = shutil.which("gh")
+    if not gh:
+        return None
+    r = run([gh, "auth", "token"])
+    t = (r.stdout or "").strip()
+    return t if r.returncode == 0 and t else None
+
+
+def _saved_token() -> Optional[str]:
+    f = config_dir() / "github.json"
+    try:
+        return json.loads(f.read_text(encoding="utf-8")).get("token") if f.is_file() else None
+    except (OSError, ValueError):
+        return None
+
+
+def _save_token(token: str) -> None:
+    f = config_dir() / "github.json"
+    f.write_text(json.dumps({"token": token}), encoding="utf-8")
+    try:
+        os.chmod(f, 0o600)
+    except OSError:
+        pass
+
+
+def github_device_flow(progress: Progress) -> str:
+    """The sign-in that never sees a password: a link and a code are printed, the user opens the browser, signs in or
+    signs up there, enters the code; the token comes back here and is saved for the next time."""
+    if not GITHUB_CLIENT_ID:
+        raise RuntimeError("github: no way to sign in — install GitHub CLI (`gh auth login`) or set VIDEO2LLM_GITHUB_CLIENT_ID")
+    st, d = _json("POST", "https://github.com/login/device/code", {"client_id": GITHUB_CLIENT_ID, "scope": "public_repo"})
+    if st != 200 or not d.get("device_code"):
+        raise RuntimeError(f"github: device code not issued ({st}: {str(d)[:200]})")
+    print(f"\nOpen {d['verification_uri']} and enter the code  {d['user_code']}  (sign in or sign up there; this waits up to 15 minutes)\n",
+          flush=True)
+    interval = int(d.get("interval") or 5)
+    deadline = time.time() + min(int(d.get("expires_in") or 900), 900)
+    while time.time() < deadline:
+        time.sleep(interval)
+        st, r = _json("POST", "https://github.com/login/oauth/access_token",
+                      {"client_id": GITHUB_CLIENT_ID, "device_code": d["device_code"], "grant_type": "urn:ietf:params:oauth:grant-type:device_code"})
+        if r.get("access_token"):
+            _save_token(r["access_token"])
+            return r["access_token"]
+        err = r.get("error")
+        if err == "slow_down":
+            interval += 5
+        elif err in ("expired_token", "access_denied"):
+            raise RuntimeError(f"github: {err.replace('_', ' ')}")
+    raise RuntimeError("github: the code was not entered in time — run the command again")
+
+
+def github_token(progress: Progress) -> str:
+    for t in (_gh_cli_token(), _saved_token()):
+        if t:
+            st, u = _json("GET", f"{GITHUB_API}/user", None, {"Authorization": f"Bearer {t}"})
+            if st == 200:
+                return t
+    return github_device_flow(progress)
+
+
+def github_link(folder: Path, slug: str, progress: Progress, title: str = "") -> Dict[str, Any]:
+    git = shutil.which("git")
+    if not git:
+        raise RuntimeError("github: git is not installed")
+    token = github_token(progress)
+    auth = {"Authorization": f"Bearer {token}", "X-GitHub-Api-Version": "2022-11-28"}
+    st, user = _json("GET", f"{GITHUB_API}/user", None, auth)
+    if st != 200:
+        raise RuntimeError(f"github: not signed in ({st})")
+    login, uid = user["login"], user.get("id")
+    st, repo = _json("GET", f"{GITHUB_API}/repos/{login}/{GITHUB_REPO_NAME}", None, auth)
+    if st == 404:
+        st, repo = _json("POST", f"{GITHUB_API}/user/repos",
+                         {"name": GITHUB_REPO_NAME, "description": "Documents of videos, made with V2L-IMT", "auto_init": True,
+                          "has_issues": False, "has_wiki": False, "has_projects": False}, auth)
+        if st not in (200, 201):
+            raise RuntimeError(f"github: the repository was not created ({st}: {str(repo)[:200]})")
+        time.sleep(2)
+    elif st != 200:
+        raise RuntimeError(f"github: {st}: {str(repo)[:200]}")
+    branch = repo.get("default_branch") or "main"
+    work = cache_dir() / "github" / login / GITHUB_REPO_NAME
+    remote = f"https://github.com/{login}/{GITHUB_REPO_NAME}.git"
+    remote_auth = f"https://x-access-token:{token}@github.com/{login}/{GITHUB_REPO_NAME}.git"
+    env = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
+
+    def g(*args: str, check: bool = True) -> subprocess.CompletedProcess:
+        r = subprocess.run([git, "-C", str(work), *args], capture_output=True, text=True, env=env)
+        if check and r.returncode != 0:
+            raise RuntimeError(f"git {args[0]}: {(r.stderr or r.stdout).strip()[:300].replace(token, '***')}")
+        return r
+
+    if not (work / ".git").is_dir():
+        work.parent.mkdir(parents=True, exist_ok=True)
+        r = subprocess.run([git, "clone", "-q", "--depth", "50", remote_auth, str(work)], capture_output=True, text=True, env=env)
+        if r.returncode != 0:
+            raise RuntimeError(f"git clone: {(r.stderr or r.stdout).strip()[:300].replace(token, '***')}")
+        g("remote", "set-url", "origin", remote)
+    else:
+        g("fetch", "-q", remote_auth, branch, check=False)
+        g("reset", "-q", "--hard", "FETCH_HEAD", check=False)
+    g("config", "user.name", login)
+    g("config", "user.email", f"{uid}+{login}@users.noreply.github.com" if uid else f"{login}@users.noreply.github.com")
+    dest = work / slug
+    if dest.exists():
+        shutil.rmtree(dest)
+    shutil.copytree(folder, dest, ignore=shutil.ignore_patterns(".*", "Thumbs.db"))
+    (work / ".nojekyll").write_text("", encoding="utf-8")
+    # the root page: a plain list of the documents (titles from each index.html)
+    rows = []
+    for d in sorted(p for p in work.iterdir() if p.is_dir() and not p.name.startswith(".") and (p / "index.html").is_file()):
+        m = re.search(r"<title>(.*?)</title>", (d / "index.html").read_text(encoding="utf-8", errors="replace"), re.S)
+        rows.append(f'<li><a href="{esc_html(d.name)}/">{esc_html(m.group(1).strip() if m else d.name)}</a></li>')
+    (work / "index.html").write_text(
+        "<!doctype html><html><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
+        "<title>Documents</title><style>body{font:16px/1.5 -apple-system,Segoe UI,Roboto,sans-serif;max-width:720px;margin:48px auto;"
+        "padding:0 24px;color:#1d1d1f}@media(prefers-color-scheme:dark){body{background:#141416;color:#eee}a{color:#e0a03c}}"
+        "li{margin:6px 0}footer{margin-top:40px;font-size:12px;color:#888}</style></head><body><h1>Documents</h1><ul>"
+        + "".join(rows) + f'</ul><footer><a href="{REPO_URL}">Made with V2L-IMT</a></footer></body></html>', encoding="utf-8")
+    g("add", "-A")
+    changed = bool(g("status", "--porcelain").stdout.strip())
+    if changed:
+        g("commit", "-q", "-m", f"{title or slug} ({slug})")
+        g("push", "-q", remote_auth, f"HEAD:{branch}")
+    st, _ = _json("GET", f"{GITHUB_API}/repos/{login}/{GITHUB_REPO_NAME}/pages", None, auth)
+    if st == 404:
+        st, d = _json("POST", f"{GITHUB_API}/repos/{login}/{GITHUB_REPO_NAME}/pages",
+                      {"build_type": "legacy", "source": {"branch": branch, "path": "/"}}, auth)
+        if st not in (200, 201):
+            log(f"  github: Pages not switched on by the API ({st}) — repo Settings → Pages → {branch} / root")
+    url = f"https://{login}.github.io/{GITHUB_REPO_NAME}/{slug}/"
+    out = {"provider": "github", "url": url, "repo": f"https://github.com/{login}/{GITHUB_REPO_NAME}",
+           "unchanged": not changed, "note": "the page is live within a minute or two after the first push"}
+    links_log({"kind": "open", **out, "dir": str(folder)})
+    return out
+
+
+def link_main(argv: List[str]) -> None:
+    ap = argparse.ArgumentParser(prog="video2llm link",
+                                 description="A web address for a document made by `video2llm guide` — the user's own link, for their "
+                                             "own use, on their own Neocities site (free; sign-up in the browser takes a minute; the API "
+                                             "key is pasted once into a local page, never into a chat). --github: their GitHub Pages "
+                                             f"instead (gh, a saved token, or the device flow) — repo {GITHUB_REPO_NAME}.")
+    ap.add_argument("dir", help="the document folder (index.html + img/ …)")
+    ap.add_argument("--github", action="store_true", help="the user's GitHub Pages instead of Neocities")
+    ap.add_argument("--slug", help="the page's folder on the site (default: from the title, latin)")
+    ap.add_argument("--json", action="store_true", help="print the result as JSON")
+    ap.add_argument("--quiet", action="store_true")
+    a = ap.parse_args(argv)
+    folder = Path(a.dir).expanduser().resolve()
+    if not (folder / "index.html").is_file():
+        sys.exit(f"{folder}: no index.html — make the document with `video2llm guide` first")
+    progress = make_progress(a.quiet)
+    m = re.search(r"<title>(.*?)</title>", (folder / "index.html").read_text(encoding="utf-8", errors="replace"), re.S)
+    title = (m.group(1).strip() if m else folder.name)
+    slug = a.slug or web_slug(title)
+    if not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,78}", slug):
+        sys.exit("--slug: latin letters, digits and dashes")
+    try:
+        out = github_link(folder, slug, progress, title) if a.github else neocities_link(folder, slug, progress, title)
+        log(f"  link: {out['url']}" + (" — unchanged" if out.get("unchanged") else ""))
+    except RuntimeError as e:
+        if a.json:
+            print(json.dumps({"error": str(e)}, ensure_ascii=False), flush=True)
+        sys.exit(f"✗ {e}")
+    if a.json:
+        print(json.dumps(out, ensure_ascii=False), flush=True)
+    else:
+        print(out["url"])
+
+
+
 def main(argv: Optional[List[str]] = None) -> None:
+    args0 = sys.argv[1:] if argv is None else argv
+    if args0 and args0[0] == "guide":   # `video2llm guide --spec …` — the document (the page, the PDF)
+        return guide_main(args0[1:])
+    if args0 and args0[0] == "link":    # `video2llm link DIR` — a web address for it, on the user's own site
+        return link_main(args0[1:])
     ap = argparse.ArgumentParser(prog="video2llm", description=__doc__.split("\n\n")[0],
                                  formatter_class=argparse.RawDescriptionHelpFormatter,
                                  epilog="Examples:\n"
@@ -2664,8 +3424,11 @@ def main(argv: Optional[List[str]] = None) -> None:
     ap.add_argument("video", help="video file (mp4, mov, m4v, webm, mpeg, avi, 3gp …) or a URL (YouTube, Vimeo, a direct link — "
                                   "anything yt-dlp knows; downloaded once into <Videos>/video2llm/downloads, up to 1080p)")
     g = ap.add_argument_group("which frames")
-    g.add_argument("--frames", choices=["1", "all", "none", "at"], default="1",
-                   help="1 = one frame per second over the whole video, 768px (default) — what happens, who says what; "
+    g.add_argument("--frames", choices=["auto", "1", "all", "none", "at"], default="auto",
+                   help="auto (default) = the script decides by the material: a lecture, a tutorial, a review, a talk (the site's "
+                        "category, the title, the chapters, the length, the share of speech — the reasons are printed) gets the LECTURE "
+                        "lane, footage to watch gets the overview; "
+                        "1 = one frame per second over the whole video, 768px — what happens, who says what; "
                         f"all = frame by frame, {DENSE_WIDTH}px — every frame from --start to --end, both included (flicker, "
                         f"glitches, fast motion); up to {DENSE_MAX_FRAMES} frames per request (4 s at 30 fps, 2 s at 60), "
                         "never thinned — a longer span is refused with the pieces to ask for; "
@@ -2813,6 +3576,18 @@ def main(argv: Optional[List[str]] = None) -> None:
         if len(at_times) > AT_MAX:
             sys.exit(f"--times: up to {AT_MAX} moments a request — ask for the rest separately")
     log(f"video2llm {VERSION} — {source.name}")
+    # --frames auto: a lecture / tutorial / review (by the site's info, before any cutting) → the lecture lane; otherwise
+    # the overview is cut and the decision is taken again with the speech share (a local file has no site info)
+    auto_hint: Optional[Dict[str, Any]] = None
+    if a.frames == "auto":
+        try:
+            pr0 = tools.probe(source)
+        except Exception:  # noqa: BLE001
+            pr0 = {"duration": float(read_info_json(source).get("duration") or 0)}
+        auto_hint = lecture_hint(source, pr0, None)
+        a.frames = "none" if auto_hint["hint"] else "1"
+        if auto_hint["hint"]:
+            log(f"  auto: a lecture / tutorial ({'; '.join(auto_hint['reasons'])}) → the lecture lane; --frames 1 for the overview")
     if a.out:
         out_dir = Path(a.out).expanduser().resolve()
         if not writable_dir(out_dir):
@@ -2833,6 +3608,13 @@ def main(argv: Optional[List[str]] = None) -> None:
                 language=a.language, progress=progress, sounds_model=a.sounds_model, voice_rescue=a.voice_rescue,
                 overview_fps=a.fps)
 
+    if auto_hint is not None and a.frames == "1":  # the second look, with the words: a talking person most of the time
+        auto_hint = lecture_hint(source, m["probe"], m.get("transcript"))
+        if auto_hint["hint"]:
+            a.frames = "none"
+            log(f"  auto: a lecture / tutorial after all ({'; '.join(auto_hint['reasons'])}) → the lecture lane; --frames 1 for the overview")
+        else:
+            log("  auto: footage to watch → the overview (--frames none for the lecture lane)")
     dense = a.frames == "all"
     if a.frames in ("none", "at"):
         blocks = []   # these lanes are built below, after the rerun command is known
@@ -2859,7 +3641,7 @@ def main(argv: Optional[List[str]] = None) -> None:
            + (f" --sound-threshold {a.sound_threshold:g}" if a.sound_threshold != 0.15 else "")
            + (f" --ffmpeg {shell_arg(a.ffmpeg)}" if a.ffmpeg else "") + (f" --ffprobe {shell_arg(a.ffprobe)}" if a.ffprobe else "")
            + (f" --sounds-model {shell_arg(a.sounds_model)}" if a.sounds_model else ""))
-    rerun = Rerun(cmd, source, a.agent_tool)
+    rerun = Rerun(cmd, source, a.agent_tool, auto=auto_hint is not None)
     if a.frames == "at":
         dur0 = m["probe"]["duration"]
         times = sorted({round(min(max(0.0, t), max(0.0, dur0 - 0.05)), 2) for t in at_times})  # time order, each moment once

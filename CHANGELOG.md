@@ -1,5 +1,31 @@
 # Changelog
 
+## [0.7.0] — 2026-10-08
+
+- **Notes — `video2llm guide --spec guide.json`:** the Guide or the Notes of a video from the structure the model wrote
+  (title, intro, `kind` guide | notes, sections with the moments whose frames illustrate them, captions): the frames are
+  cut (1024 px, or reused from `--frames at`) and one page is written — the frames under a timecode chip, full screen on
+  a click, a guide's steps numbered on the margin, a contents list from four sections, a **Download PDF** button that
+  prints through the reader's browser (tight: two frames to a row, nothing breaks across pages). The page says «Made
+  with V2L-IMT · Immersive Media Technologies» and links the terms. `--pdf` prints a file here for a program that wants
+  one; by default there is no file and no extra folder — the page is the document.
+- **`video2llm link DIR`** — the page's web address on the user's own Neocities site (one multipart request; the API key
+  is pasted once into a page on 127.0.0.1 the script opens, never into a chat, and kept in `~/.config/video2llm/`;
+  every address made is listed in `links.json` there). `--github`: the user's GitHub Pages instead (gh when logged in,
+  a saved token, or the device flow — a link and a code, the sign-in in the browser).
+- **The lecture lane ends with one question:** make the Guide / the Notes? — the model names the fitting form and builds
+  nothing before the answer; in `--agent-tool` mode it calls the host's `video_guide`. The word «publishing» is gone:
+  it is the user's link, nothing is announced anywhere.
+- **`--frames auto` is the default:** the script decides by the material — the site's category, the title and
+  description, the chapters, the length, the share of speech (a local file: the last two) — and says why; a lecture,
+  a tutorial, a review gets the lecture lane, footage to watch the overview. The overview's rules tell the model to
+  switch lanes itself (`--frames none`; the `video` tool's `what: lecture` in Deep Artisan) when the words show it is
+  a lecture after all. The lecture lane's rules name what counts as material to keep (and what does not — a film, a
+  clip, a vlog, a sketch, an ad, a stream).
+- `agents/` is positioned as a section to add to the instructions an agent already has (AGENTS.md / CLAUDE.md / an
+  existing SKILL.md), updated for links, the auto lane and Notes.
+- `TERMS.md`: what the tool is responsible for when a document gets an address, and what the user is.
+
 ## [0.6.1] — 2026-10-08
 
 - **A subtitle the site refuses no longer takes the video down.** YouTube answers `429` to too many caption

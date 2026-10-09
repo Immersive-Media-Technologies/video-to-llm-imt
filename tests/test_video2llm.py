@@ -336,7 +336,7 @@ def test_agent_files_carry_one_instruction():
     for path in plain + others:
         assert path.is_file(), path
         assert body(path) == ref, path
-    for must in ("python3 /path/to/video2llm.py <video>", "lane.md", "--frames all", "--sounds", "ffmpeg", "yes or no"):
+    for must in ("python3 /path/to/video2llm.py <video file or URL>", "lane", "--frames all", "--sounds", "ffmpeg", "yes or no", "Guide", "Notes"):
         assert must in ref, must
     skill = (agents / "SKILL.md").read_text(encoding="utf-8")
     front = skill.split("---\n", 2)[1]
@@ -523,8 +523,137 @@ def test_lecture_lane_has_the_words_and_no_frames(clip, tmp_path):
     assert "LECTURE MODE" in head and "«Export tutorial»" in head and "NO frames" in head
     assert "Open the Settings panel" in head and "and click Export" in head and "[chapters, from the site]" in head
     assert '"what": "at", "times": ["03:12", "07:40"]' in head and "written by people" in head
-    assert "with the video_guide tool" in head   # the harness's own tool, named only in --agent-tool mode
+    assert "`video_guide` tool" in head and "make the Guide" in head and "«Download PDF»" in head and "publishing" in head  # the one question; the harness's tool only in --agent-tool mode
     assert not (out / "frames_1fps_768px").exists() or not list((out / "frames_1fps_768px").glob("*.jpg"))
     hint = video2llm.lecture_hint(v, {"duration": 6.0}, [{"start": 1, "end": 2.5}, {"start": 3, "end": 4}])
     assert hint["hint"] is True and "category" in " ".join(hint["reasons"])
     assert video2llm.lecture_hint(clip, {"duration": 6.0}, None)["hint"] is False
+
+
+# ── guide / link ───────────────────────────────────────────────────────────────────────────────────────
+def test_guide_builds_the_page_and_cuts_the_frames(clip, tmp_path):
+    spec = {"title": "Clip notes / test", "intro": "Two **steps**.", "lang": "en", "kind": "guide",
+            "source": {"file": str(clip), "title": "Portrait clip", "url": "https://example.com/v"},
+            "sections": [{"heading": "1. Start", "text": "First.\n\n- one\n- two", "frames": ["0:01", "0:03.5"], "captions": ["The start", "Later"]},
+                         {"heading": "End", "text": "1. a\n2. b", "frames": []}]}
+    sp = tmp_path / "spec.json"
+    sp.write_text(json.dumps(spec), encoding="utf-8")
+    out = tmp_path / "doc"
+    r = run("guide", "--spec", sp, "--out", out, "--json")
+    res = json.loads(r.stdout.strip().splitlines()[-1])
+    assert res["frames"] == 2 and res["sections"] == 2 and Path(res["html"]).is_file() and "slides" not in res
+    assert sorted(p.name for p in (out / "img").glob("*.jpg")) == ["00-01.00.jpg", "00-03.50.jpg"]
+    html = (out / "index.html").read_text(encoding="utf-8")
+    assert "<h1>Clip notes / test</h1>" in html and '<div class="figs n2">' in html and "<b>steps</b>" in html
+    assert 'href="https://example.com/v"' in html and "Made with V2L-IMT" in html and "Immersive Media Technologies" in html and "TERMS.md" in html and "data:image/png;base64," in html
+    assert "<ol><li>a</li><li>b</li></ol>" in html and "noindex" in html and '<span class="tc">00:06</span>' in html
+    # a guide numbers its steps; the «1.» the model wrote is not doubled; the frames open in the lightbox
+    assert '<span class="num" aria-hidden="true">1.</span>Start</h2>' in html and 'data-t="0:03.5"' in html and 'id="lb"' in html
+    assert 'data-cap="The start"' in html and "<figcaption>Later</figcaption>" in html
+    assert "pdf" not in res  # not asked for
+    (tmp_path / "n.json").write_text(json.dumps({**spec, "kind": "notes"}), encoding="utf-8")
+    run("guide", "--spec", tmp_path / "n.json", "--out", tmp_path / "notes", "--json")
+    assert 'class="num"' not in (tmp_path / "notes" / "index.html").read_text(encoding="utf-8")
+
+
+def test_guide_refuses_a_bad_spec(tmp_path):
+    sp = tmp_path / "spec.json"
+    sp.write_text(json.dumps({"title": "x", "sections": [{"heading": "h", "text": "t", "frames": ["nope"]}]}), encoding="utf-8")
+    r = run("guide", "--spec", sp, "--out", tmp_path / "d", ok=False)
+    assert r.returncode != 0 and "moments are mm:ss" in r.stderr
+
+
+def test_guide_text_html_and_slugs():
+    assert video2llm.guide_text_html("a **b** `c`\n- x\n- y\n\n1. z") == "<p>a <b>b</b> <code>c</code></p>\n<ul><li>x</li><li>y</li></ul>\n<ol><li>z</li></ol>"
+    assert video2llm.web_slug("Экспорт видео в Premiere Pro — конспект") == "eksport-video-v-premiere-pro-konspekt"
+    assert video2llm.guide_slug('a/b:c*"d') == "a b c d"
+
+
+def test_link_uploads_to_the_users_neocities_site(tmp_path, monkeypatch):
+    doc = tmp_path / "doc"
+    (doc / "img").mkdir(parents=True)
+    (doc / "index.html").write_text("<title>My notes</title>", encoding="utf-8")
+    (doc / "img" / "a.jpg").write_bytes(b"jpg")
+    (doc / ".DS_Store").write_bytes(b"")
+    monkeypatch.setenv("HOME", str(tmp_path)); monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "c"))
+    cfg = tmp_path / ".config" / "video2llm"; cfg.mkdir(parents=True)
+    (cfg / "neocities.key").write_text("k-123\n")
+    calls = []
+
+    def fake_http(method, url, *, data=None, headers=None, timeout=60):
+        calls.append((method, url, headers or {}, data))
+        if url.endswith("/api/info"):
+            return 200, json.dumps({"result": "success", "info": {"sitename": "alice"}}).encode(), {}
+        if url.endswith("/api/upload"):
+            assert headers["Authorization"] == "Bearer k-123" and b'name="my-notes/img/a.jpg"' in data and b'name="my-notes/index.html"' in data
+            assert b".DS_Store" not in data
+            return 200, json.dumps({"result": "success"}).encode(), {}
+        raise AssertionError(url)
+
+    monkeypatch.setattr(video2llm, "_http", fake_http)
+    monkeypatch.setattr(video2llm, "config_dir", lambda: cfg)
+    video2llm.link_main([str(doc), "--json", "--quiet"])
+    assert any(u.endswith("/api/upload") for _, u, _, _ in calls)
+    rows = json.loads((cfg / "links.json").read_text())
+    assert rows[-1]["url"] == "https://alice.neocities.org/my-notes/" and rows[-1]["files"] == 2
+
+
+def test_link_asks_for_the_key_on_a_local_page_never_in_the_chat(tmp_path, monkeypatch):
+    import threading, urllib.request, urllib.parse
+    cfg = tmp_path / "cfg"; cfg.mkdir()
+    monkeypatch.setattr(video2llm, "config_dir", lambda: cfg)
+    monkeypatch.setattr(video2llm, "KEY_WAIT_SEC", 20)
+    monkeypatch.setattr("webbrowser.open", lambda *a, **k: False)
+    seen = {}
+
+    def check(k):
+        seen["k"] = k
+        return None if k == "good" else "bad key"
+    import io, contextlib
+    buf = io.StringIO()
+
+    def poster():
+        import time
+        for _ in range(100):
+            if "url" in seen:
+                break
+            m = re.search(r"open (http://127\.0\.0\.1:\d+/)", buf.getvalue())
+            if m:
+                seen["url"] = m.group(1)
+                break
+            time.sleep(0.05)
+        page = urllib.request.urlopen(seen["url"]).read().decode()
+        assert "Neocities" in page and "paste" in page.lower()
+        r = urllib.request.urlopen(urllib.request.Request(seen["url"], data=urllib.parse.urlencode({"key": "wrong"}).encode(), method="POST")).read().decode()
+        assert "bad key" in r
+        r = urllib.request.urlopen(urllib.request.Request(seen["url"], data=urllib.parse.urlencode({"key": "good"}).encode(), method="POST")).read().decode()
+        assert "Saved" in r
+    th = threading.Thread(target=poster); th.start()
+    with contextlib.redirect_stdout(buf):
+        key = video2llm.ask_key_in_browser("Neocities", ["Sign up", "paste the key"], check)
+    th.join(10)
+    assert key == "good" and seen["k"] == "good"
+
+
+def test_frames_auto_picks_the_lane_by_the_material(clip, tmp_path):
+    # footage to watch (a test pattern with a tone, no site info) → the overview
+    v = tmp_path / "footage.mp4"
+    shutil.copy(clip, v)
+    r = run(v, "--no-transcript")
+    assert "auto: footage to watch" in r.stderr and (v.with_name("footage_frames") / "lane.md").is_file()
+    head = (v.with_name("footage_frames") / "lane.md").read_text(encoding="utf-8")
+    assert "--frames none" in head and "something taught, shown or explained" in head  # the way to the lecture lane
+    # a tutorial by the site's info → the lecture lane, no frames cut
+    w = tmp_path / "howto.mp4"
+    shutil.copy(clip, w)
+    (tmp_path / "howto.info.json").write_text(json.dumps({"title": "Export tutorial", "categories": ["Education"], "language": "en"}), encoding="utf-8")
+    r = run(w, "--no-transcript")
+    assert "auto: a lecture / tutorial" in r.stderr and "lecture lane" in r.stderr
+    out = w.with_name("howto_frames")
+    assert (out / "lane_lecture.md").is_file() and not list((out / "frames_1fps_768px").glob("*.jpg")) if (out / "frames_1fps_768px").exists() else True
+    lane = (out / "lane_lecture.md").read_text(encoding="utf-8")
+    assert "MATERIAL TO KEEP" in lane and "do not offer it at all" in lane
+    # --frames 1 overrides the decision
+    r = run(w, "--no-transcript", "--frames", "1")
+    assert "auto:" not in r.stderr and (out / "lane.md").is_file()
+
