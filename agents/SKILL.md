@@ -13,8 +13,11 @@ work from what it writes:
 
     python3 ~/.claude/skills/video2llm/video2llm.py <video file or URL>   (the copy of video2llm.py in this skill's folder)
 
-A link is downloaded once (its captions stand in for speech recognition); the script then **decides by the
-material** which lane to write and says why:
+**A link gets the words only** → `lane_link.md`: the site's captions (or, without them, the sound alone through
+speech recognition) with their times and the chapters — the video is not downloaded. Decide from the user's
+message what they want of the link and do that; when the message does not say, ask one short question. Ask for
+the picture only where the task needs it seen (`--frames at`, the overview) — the first such request downloads
+the video, the words are kept. **A file**: the script **decides by the material** which lane to write and says why:
 
 - **Footage to watch** (a film, a clip, a vlog, home video) → `<video>_frames/lane.md`: the frames at 1 per
   second as contact sheets (3 to an image, each tagged with its time), the words spoken under each sheet,
@@ -51,6 +54,7 @@ Then:
    reading `video2llm.json` or the single frames — only the images the lanes link to. If a detail is too
    small to tell, say so.
 
-The first run of a video takes 10–20 s (speech recognition) — a link also downloads the video; the very
+The first run of a video takes 10–20 s (speech recognition) — a link takes a few seconds (its captions), a
+request for its frames downloads the video first; the very
 first run on a machine downloads the speech model (464 MB) — allow the command a few minutes then. Every
 later run on the same video is under a second. On Windows the command is `python`, not `python3`.

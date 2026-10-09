@@ -210,7 +210,8 @@ sounds all five found the laughter at 01:55–01:58 and the boy who laughs. Nobo
 ```sh
 python3 video2llm.py clip.mp4                                        # the lane the material calls for → clip_frames/lane.md (or lane_lecture.md)
 python3 video2llm.py talk.mp3                                        # a sound file: the words with their times, no frames → talk_frames/lane_audio.md
-python3 video2llm.py https://youtu.be/…                              # a video by link: downloaded once, its captions stand in for Whisper
+python3 video2llm.py https://youtu.be/…                              # a link: the words only (the site's captions), the video is NOT downloaded → lane_link.md
+python3 video2llm.py https://youtu.be/… --frames 1                   # a link, the overview: downloaded once (up to 1080p), its captions stand in for Whisper
 python3 video2llm.py clip.mp4 --frames all --start 0:12 --end 0:14   # every frame from 0:12 to 0:14
 python3 video2llm.py clip.mp4 --sounds --start 2:14 --end 2:22       # the sounds of that moment + the frames where they happen
 python3 video2llm.py lecture.mp4 --frames at --times 3:12,7:40       # one 1024px frame at each moment (a slide, an interface, text)
@@ -227,7 +228,7 @@ python3 video2llm.py clip.mp4 --agent-tool video                     # for a har
 ```
 
 ```
-video2llm 0.7.1 — IMG_2056.MOV
+video2llm 0.7.2 — IMG_2056.MOV
   [probe] 100% — 720×1280, 02:29, 30.00 fps, audio
   auto: footage to watch → the overview (--frames none for the lecture lane)
   [frames] 100% — 149 frames at 1/s
@@ -351,6 +352,9 @@ What the tool is and is not responsible for when the Notes get a web address: [T
 
 Every version is on the [Releases](../../releases) page.
 
+- v0.7.2 — a link gets the words only (`lane_link.md`: the site's captions, or the sound alone → Whisper; the
+  video is not downloaded); the model decides from the message what to do and asks for the picture where it is
+  needed — the first such request downloads the video, the words are kept.
 - v0.7.1 — sound files (mp3, wav, m4a …): the audio lane — the words with their times, the sounds on request, no
   frames; the lecture hint reads a local file's name and a high speech share; `--sounds` on the lecture lane.
 - v0.7.0 — Notes: `guide` (one page with the key frames — a lightbox, numbered steps, a Download PDF button) and

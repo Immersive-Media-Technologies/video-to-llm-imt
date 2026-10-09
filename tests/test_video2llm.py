@@ -364,8 +364,24 @@ prints = {}
 for i, a in enumerate(args):
     if a == "--print-to-file":
         prints[args[i + 1]] = Path(args[i + 2])
+tmpl = args[args.index("-o") + 1]
+if tmpl.endswith("audio-src.%(ext)s"):   # the sound alone (0.7.2 words lane without captions): the clip stands in
+    shutil.copy(os.environ["VIDEO2LLM_TEST_CLIP"], Path(tmpl).with_name("audio-src.mp4"))
+    print("[download] 100.0% of 0.10MiB")
+    sys.exit(0)
 dest = out / "Title [abc123].mp4"
 prints["%(id)s"].write_text("abc123\\n", encoding="utf-8")
+if "--skip-download" in args:   # 0.7.2: the info file and the captions only; `filename` = the name the video would get
+    if "--write-subs" in args and os.environ.get("VIDEO2LLM_TEST_NO_CAPTIONS") != "1":
+        (out / "Title [abc123].en.vtt").write_text(
+            "WEBVTT\\n\\n00:00:00.500 --> 00:00:02.000\\nhello from the captions\\n\\n00:00:03.000 --> 00:00:05.000\\nsecond line\\n",
+            encoding="utf-8")
+    (out / "Title [abc123].info.json").write_text(
+        '{"title": "A tutorial on exporting", "webpage_url": "https://example.com/watch?v=abc123", "extractor_key": "Example", '
+        '"duration": 6, "width": 720, "height": 1280, "fps": 30, "categories": ["Education"], "language": "en", '
+        '"subtitles": {"en": []}, "automatic_captions": {}, "chapters": [{"start_time": 0, "title": "Intro"}]}', encoding="utf-8")
+    prints["filename"].write_text(str(dest) + "\\n", encoding="utf-8")
+    sys.exit(0)
 if dest.exists():      # yt-dlp skips a file it downloaded before and the after_move hook with it
     print("[download] " + str(dest) + " has already been downloaded")
     sys.exit(0)
@@ -400,7 +416,7 @@ def test_a_url_is_downloaded_with_yt_dlp_then_treated_as_a_file(clip, tmp_path):
     out = tmp_path / "lane"
     # no --no-transcript: the captions stand in; --captions ru asks for Russian, but the manual English track —
     # the video's own language — is read before the site's machine translation
-    r = run("https://example.com/watch?v=abc123", "--captions", "ru", "--out", out, env=env)
+    r = run("https://example.com/watch?v=abc123", "--frames", "1", "--captions", "ru", "--out", out, env=env)
     assert "[download] 100%" in r.stderr
     assert "(manual captions, no Whisper)" in r.stderr and "faster-whisper" not in r.stderr
     head = (out / "lane.md").read_text(encoding="utf-8")
@@ -416,7 +432,7 @@ def test_a_url_is_downloaded_with_yt_dlp_then_treated_as_a_file(clip, tmp_path):
     r3 = run("https://example.com/watch?v=abc123", "--download-only", "--quiet", env=env)
     assert r3.stdout.strip().endswith("Title [abc123].mp4") and Path(r3.stdout.strip()).is_file()
     # the same URL again: yt-dlp reports the file as downloaded already and video2llm finds it by its id
-    r2 = run("https://example.com/watch?v=abc123", "--no-transcript", "--out", out, env=env)
+    r2 = run("https://example.com/watch?v=abc123", "--frames", "1", "--no-transcript", "--out", out, env=env)
     assert "[download] 100%" in r2.stderr and "Title [abc123].mp4" in r2.stderr and (out / "lane.md").exists()
 
 
@@ -427,6 +443,60 @@ def test_yt_dlp_args_ask_for_one_mp4_up_to_1080p(tmp_path):
     assert "[height<=1080]" in args[args.index("-f") + 1]
     assert args[args.index("-o") + 1].startswith(str(tmp_path))
     assert "after_move:filepath" in args
+    words = video2llm.yt_dlp_args(["yt-dlp"], "https://x/y", tmp_path, "/usr/bin/ffmpeg", tmp_path / "id", tmp_path / "p", skip_download=True)
+    assert "--skip-download" in words and "filename" in words and "after_move:filepath" not in words and "--write-subs" in words
+
+
+def test_a_url_gets_the_words_only_and_the_video_on_request(clip, tmp_path):
+    """0.7.2: a link → the site's captions, no download; the lane names the link and the way to ask for frames;
+    the planned file name is enough for a later run to download the video and keep the words."""
+    env = fake_yt_dlp(tmp_path)
+    env["VIDEO2LLM_TEST_CLIP"] = str(clip)
+    env["VIDEO2LLM_DOWNLOADS"] = str(tmp_path / "downloads")
+    r = run("https://example.com/watch?v=abc123", "--agent-tool", "video", "--json", env=env)
+    assert "[download]" not in r.stderr and "words lane: 2 line(s), no frames — the video is not downloaded" in r.stderr
+    j = json.loads(r.stdout.strip().splitlines()[-1])
+    planned = Path(j["file"])
+    assert planned.name == "Title [abc123].mp4" and not planned.exists() and j["downloaded"] is False
+    assert j["captions"] == "manual" and j["lines"] == 2 and j["title"] == "A tutorial on exporting" and j["lecture"]["hint"] is True
+    out = Path(j["dir"])
+    assert out == planned.with_name("Title [abc123]_frames") and (out / "lane_link.md").exists() and (out / "video2llm.json").exists()
+    head = (out / "lane_link.md").read_text(encoding="utf-8")
+    assert "WORDS ONLY" in head and "«A tutorial on exporting»" in head and "https://example.com/watch?v=abc123" in head
+    assert "itself was not downloaded" in head and "DOWNLOADS the video" in head and "ask ONE short question" in head
+    assert '"what": "at", "times": ["03:12", "07:40"]' in head and '"what": "next", "start": "00:00"' in head
+    assert "hello from the captions" in head and "[chapters, from the site]" in head and "`video_guide` tool" in head
+    assert "files it as something taught" in head
+    assert not list(out.glob("*/*.jpg"))
+    m = json.loads((out / "video2llm.json").read_text(encoding="utf-8"))
+    assert m["source_mtime"] is None and m["link"]["url"].endswith("abc123") and m["transcript"][0]["text"] == "hello from the captions"
+    # the words lane again, by the planned name — no yt-dlp at all
+    r2 = run(planned, "--frames", "words", "--agent-tool", "video", "--label", "@vid-1", env={"VIDEO2LLM_YT_DLP": "/nonexistent"})
+    assert "words lane: 2 line(s)" in r2.stderr and "[@vid-1: link" in (out / "lane_link.md").read_text(encoding="utf-8")
+    # a frame asked for by the planned name: the video is downloaded now, the words are kept (no Whisper, no captions read again)
+    r3 = run(planned, "--frames", "at", "--times", "0:01", "--agent-tool", "video", env=env)
+    assert "not on this computer yet — downloading it" in r3.stderr and "[download] 100%" in r3.stderr and planned.is_file()
+    assert "faster-whisper" not in r3.stderr
+    m2 = json.loads((out / "video2llm.json").read_text(encoding="utf-8"))
+    assert m2["source_mtime"] is not None and m2["link"]["downloaded"] is True and m2["transcript"][0]["text"] == "hello from the captions"
+    assert list((out / "frames_at_1024px").glob("*.jpg"))
+    # the words lane of the downloaded file says the video is here
+    run(planned, "--frames", "words", "--agent-tool", "video", env=env)
+    assert "is on this computer but no frames were cut" in (out / "lane_link.md").read_text(encoding="utf-8")
+
+
+def test_a_url_without_captions_gets_the_sound_alone_for_whisper(clip, tmp_path):
+    if not has("faster_whisper"):
+        pytest.skip("faster-whisper is not installed")
+    env = fake_yt_dlp(tmp_path)
+    env["VIDEO2LLM_TEST_CLIP"] = str(clip)
+    env["VIDEO2LLM_DOWNLOADS"] = str(tmp_path / "downloads")
+    env["VIDEO2LLM_TEST_NO_CAPTIONS"] = "1"
+    r = run("https://example.com/watch?v=abc123", "--whisper-model", "base", env=env)
+    assert "no captions — fetching the sound alone" in r.stderr and "words lane:" in r.stderr
+    out = tmp_path / "downloads" / "Title [abc123]_frames"
+    assert (out / "audio.wav").exists() and not (tmp_path / "downloads" / "Title [abc123].mp4").exists()
+    assert "automatic speech transcript" in (out / "lane_link.md").read_text(encoding="utf-8")
 
 
 def test_no_yt_dlp_says_how_to_install_it(tmp_path):

@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.7.2] — 2026-10-09
+
+- **A link gets the words only.** A URL on the command line (`--frames auto`, the default, or `--frames words`)
+  fetches the site's info file and captions and nothing else — the video is **not downloaded**; no captions on
+  the site → the sound alone (a few MB) → Whisper, the wav kept for later. The lane (`lane_link.md`,
+  WORDS ONLY) names the link, the site and the length, carries the words with their times and the chapters, and
+  tells the model: decide from the user's message what to do with the link, ask one short question when the
+  message does not say, and ask for the picture only where the task needs it seen — `--frames at`, the overview,
+  every frame or the sounds. **The first such request downloads the video** (the name is known from the
+  words run, so the same `<name>_frames` folder goes on; the words are kept, nothing is read or recognised
+  twice). The one question about the Guide / the Notes stays. `--frames 1 | all | at | none` on a URL download
+  as before; `--download-only` is unchanged.
+- `--frames words` on a file that is here: the same words lane (the transcript, no frames) for any video.
+
 ## [0.7.1] — 2026-10-09
 
 - **Sound files.** mp3, wav, m4a, aac, ogg, opus, flac, aiff — whatever ffmpeg reads — get the audio lane

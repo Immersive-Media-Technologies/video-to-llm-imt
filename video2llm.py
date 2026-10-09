@@ -68,7 +68,7 @@ import zipfile
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-VERSION = "0.7.1"
+VERSION = "0.7.2"
 
 # ── constants (same numbers as the Deep Artisan pipeline) ────────────────────────────────────────
 NATIVE_LIMIT_BYTES = 19 * 1024 * 1024  # Gemini request limit 20 MB minus headroom
@@ -992,11 +992,14 @@ def download_dir() -> Path:
 
 
 def yt_dlp_args(exe: List[str], url: str, dest: Path, ffmpeg: str, id_file: Path, path_file: Path,
-                language: Optional[str] = None, prefer: Optional[List[str]] = None, subs: bool = True) -> List[str]:
+                language: Optional[str] = None, prefer: Optional[List[str]] = None, subs: bool = True,
+                skip_download: bool = False) -> List[str]:
     """One video (no playlist), the best streams up to 1080p merged into an mp4 — the lane never needs
     more; the site's subtitles beside it as .vtt (manual ones in the asked language / ru / en, and the
     automatic track in the original language — `*-orig`) — they stand in for Whisper; the id and the
-    final path are written to files (the console is progress only)."""
+    final path are written to files (the console is progress only). `skip_download` (0.7.2, the words of a
+    link): the info file and the subtitles only — the path file then names the file the video WOULD get,
+    so the same run later lands on the same name."""
     langs: List[str] = []
     for x in ([language] if language and language != "auto" else []) + list(prefer or []) + ["en"]:
         if x and x not in langs:
@@ -1010,10 +1013,112 @@ def yt_dlp_args(exe: List[str], url: str, dest: Path, ffmpeg: str, id_file: Path
                   "--write-info-json", "--no-clean-info-json",
                   *(["--write-subs", "--write-auto-subs", "--sub-langs", ",".join(langs) + ",.*-orig,-live_chat",
                      "--sub-format", "vtt/srt/best", "--convert-subs", "vtt"] if subs else []),
+                  *(["--skip-download"] if skip_download else []),
                   "-o", str(dest / "%(title).60B [%(id)s].%(ext)s"),
                   "--print-to-file", "%(id)s", str(id_file),
-                  "--print-to-file", "after_move:filepath", str(path_file),
+                  "--print-to-file", "filename" if skip_download else "after_move:filepath", str(path_file),
                   "--", url]
+
+
+def fetch_words(url: str, tools: "Tools", progress: Progress, override: Optional[str] = None,
+                language: Optional[str] = None, prefer: Optional[List[str]] = None, out: Optional[Path] = None,
+                whisper_model: str = "small", transcript: bool = True) -> Tuple[Path, Path, Dict[str, Any]]:
+    """0.7.2 — a link, the words only: the site's info file and subtitles land where the video would (its
+    name is known without downloading it), nothing else is fetched. No subtitles on the site → the sound
+    alone (a few MB) → Whisper, the wav kept for the video's own run later. Writes the link manifest into
+    the lane folder (`<name>_frames` beside the future file): the same manifest prepare() picks up when the
+    video is downloaded, so the words are never made twice. Returns (the future file, the lane folder, the
+    manifest)."""
+    exe = yt_dlp_command(override)
+    if not exe:
+        hint = {"darwin": "brew install yt-dlp", "win32": "winget install yt-dlp"}.get(sys.platform, "pip install yt-dlp")
+        sys.exit(f"a video URL needs yt-dlp. Install it ({hint}, or: pip install yt-dlp) or pass --yt-dlp /path/to/yt-dlp.")
+    dest = download_dir()
+    progress("words", 0, url)
+    with tempfile.TemporaryDirectory(prefix="video2llm-dl-") as td:
+        id_file, path_file = Path(td) / "id.txt", Path(td) / "path.txt"
+        try:
+            r = run(yt_dlp_args(exe, url, dest, tools.ffmpeg, id_file, path_file, language, prefer, skip_download=True))
+        except OSError as e:
+            sys.exit(f"yt-dlp could not be run ({' '.join(exe)}): {e}")
+        got = path_file.read_text(encoding="utf-8").strip().splitlines()[-1] if path_file.exists() and path_file.read_text(encoding="utf-8").strip() else ""
+    if not got:
+        tail = (r.stderr or r.stdout or "").strip().splitlines()
+        sys.exit("yt-dlp could not read the link" + (": " + tail[-1] if tail else "") + f" ({url})")
+    planned = dest / Path(got).name  # the name the video will get; info.json and the .vtt already sit beside it
+    out_dir = (out or planned.with_name(f"{planned.stem}_frames")).resolve()
+    out_dir.mkdir(parents=True, exist_ok=True)
+    info = read_info_json(planned)
+    progress("words", 60, str(info.get("title") or planned.stem))
+    cap = captions_beside(planned, language if language != "auto" else None, prefer)
+    segs: Optional[List[Dict[str, Any]]] = None
+    tr_meta: Dict[str, Any] = {}
+    if cap is not None:
+        segs = cap["segments"]
+        tr_meta = {"language": cap["language"], "language_source": "captions", "gate": "captions",
+                   "source": "captions", "kind": cap["kind"], "file": cap["file"].name}
+        progress("words", 100, f"{len(segs)} lines from {cap['file'].name} ({cap['kind']} captions, no download)")
+    elif transcript:
+        import importlib.util
+        if importlib.util.find_spec("faster_whisper") is None:
+            log("  the site has no captions and faster-whisper is not installed — no words (pip install faster-whisper)")
+            progress("words", 100, "no captions")
+        else:
+            log("  the site has no captions — fetching the sound alone for Whisper")
+            wav = out_dir / NAMES["en"]["audio"]
+            if not wav.exists():
+                with tempfile.TemporaryDirectory(prefix="video2llm-au-") as td:
+                    last = [-1]
+
+                    def on_line(line: str) -> None:
+                        m = re.search(r"\[download\]\s+([\d.]+)%", line)
+                        if m:
+                            pct = int(float(m.group(1)))
+                            if pct != last[0]:
+                                last[0] = pct
+                                progress("audio", pct)
+                    r = run(exe + ["--no-playlist", "--no-warnings", "--newline", "--progress", "-f", "ba/b",
+                                   "--ffmpeg-location", str(Path(tools.ffmpeg).resolve().parent),
+                                   "-o", str(Path(td) / "audio-src.%(ext)s"), "--", url], on_line)
+                    src = next((f for f in Path(td).iterdir() if f.is_file() and f.stem == "audio-src"), None)
+                    if src is None:
+                        tail = (r.stderr or "").strip().splitlines()
+                        sys.exit("yt-dlp could not fetch the sound" + (": " + tail[-1] if tail else "") + f" ({url})")
+                    dur = float(info.get("duration") or 0)
+                    tools.ffmpeg_run(["-i", str(src), "-vn", "-ac", "1", "-ar", "16000", "-f", "wav", str(wav)], dur, "audio", progress)
+                progress("audio", 100)
+            res = transcribe(wav, whisper_model, language, progress, None, "silero")
+            if res is not None:
+                segs = res["segments"]
+                tr_meta = {k: res[k] for k in ("language", "language_source", "gate")}
+    else:
+        progress("words", 100, "no captions")
+    if segs is not None:
+        (out_dir / "transcript.txt").write_text("\n".join(seg_line(x) for x in segs) + "\n", encoding="utf-8")
+    dur = float(info.get("duration") or 0)
+    p = {"duration": dur, "width": int(info.get("width") or 0), "height": int(info.get("height") or 0),
+         "fps": float(info.get("fps") or 0), "bitrate_kbps": 0, "has_audio": True, "has_video": True, "bytes": 0}
+    old = {}
+    try:
+        old = json.loads((out_dir / MANIFEST_NAME).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        pass
+    m = {
+        "tool": "video2llm", "version": VERSION, "created_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        "source": str(planned), "source_mtime": None, "dir": str(out_dir), "probe": p, "work": str(planned),
+        "frames": [], "overview_cut": None, "overview_fps": FRAME_FPS, "dense": None,
+        "transcript": segs, "transcript_meta": tr_meta, "sound_spans": [], "native": None, "native_plan": None,
+        "link": {"url": url, "webpage_url": info.get("webpage_url") or url, "title": info.get("title"),
+                 "site": info.get("extractor_key") or info.get("extractor"), "uploader": info.get("uploader") or info.get("channel"),
+                 "downloaded": False, "lecture": lecture_hint(planned, p, segs)},
+    }
+    if planned.is_file():  # fetched before: the video is already here — the words lane still says so
+        m["link"]["downloaded"] = True
+        if old.get("source_mtime") is not None:  # a full manifest exists: keep it, refresh the words only
+            old["transcript"], old["transcript_meta"], old["link"] = segs, tr_meta, m["link"]
+            m = old
+    (out_dir / MANIFEST_NAME).write_text(json.dumps(m, ensure_ascii=False, indent=1), encoding="utf-8")
+    return planned, out_dir, m
 
 
 def download_video(url: str, tools: "Tools", progress: Progress, override: Optional[str] = None,
@@ -1250,7 +1355,12 @@ def prepare(source: Path, out_dir: Path, tools: Tools, names: Dict[str, str], *,
             m = json.loads(manifest_path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             m = {"source_mtime": None}
-        if m.get("source_mtime") != mtime or (m.get("probe") or {}).get("bytes", source.stat().st_size) != source.stat().st_size:
+        if m.get("link") and m.get("source_mtime") is None:
+            # 0.7.2: the words of this link came first (fetch_words); the video file is here now — keep the
+            # words (and the wav Whisper read), cut the rest as for any new file
+            m = {"transcript": m.get("transcript"), "transcript_meta": m.get("transcript_meta"),
+                 "link": dict(m["link"], downloaded=True)}
+        elif m.get("source_mtime") != mtime or (m.get("probe") or {}).get("bytes", source.stat().st_size) != source.stat().st_size:
             stale_cleanup(out_dir)  # a different video under the same name: cut everything again
             m = {}
 
@@ -1271,6 +1381,8 @@ def prepare(source: Path, out_dir: Path, tools: Tools, names: Dict[str, str], *,
             f"at {rate} per second" + ("" if sp["every"] else f" (of {p['fps']:.0f})") + f", {DENSE_WIDTH}px on the long side")
     elif frames_mode == "none" and not p_has_video(p):
         log("  frames: none — a sound file: the words with their time spans, and the sounds on request (--sounds)")
+    elif frames_mode == "words":
+        log("  frames: none — the words lane: the transcript, the picture on request")
     elif frames_mode == "none":
         log("  frames: none — a lecture lane: the transcript, and single frames on request (--frames at --times mm:ss,…)")
     elif frames_mode == "at":
@@ -1290,7 +1402,7 @@ def prepare(source: Path, out_dir: Path, tools: Tools, names: Dict[str, str], *,
         progress("work copy", 100, "1080p")
 
     cut_fps = int(m.get("overview_fps") or FRAME_FPS)  # how dense the folder's overview already is
-    if frames_mode in ("none", "at"):
+    if frames_mode in ("none", "at", "words"):
         pass  # no overview: a lecture lane (the transcript) or single frames by time — cut after prepare()
     elif frames_mode != "all":
         # the overview lane, 768 px, names = timecodes; --fps 2–4 adds the frames between the seconds to the same
@@ -1449,6 +1561,7 @@ def prepare(source: Path, out_dir: Path, tools: Tools, names: Dict[str, str], *,
         "frames": frames, "overview_cut": OVERVIEW_CUT if frames else m.get("overview_cut"), "overview_fps": cut_fps, "dense": dense,
         "transcript": segs, "transcript_meta": tr_meta, "sound_spans": sound_spans,
         "native": native_parts, "native_plan": plan,
+        "link": m.get("link"),  # 0.7.2: the file came from a link — the lanes name the site and the address
     }
     manifest_path.write_text(json.dumps(m, ensure_ascii=False, indent=1), encoding="utf-8")
     progress("done", 100, str(out_dir))
@@ -2126,6 +2239,57 @@ def audio_blocks(m: Dict[str, Any], label: str, rerun: Optional["Rerun"] = None)
             f"[{tcode(float(c.get('start_time') or 0))}] {str(c.get('title') or '').strip()}" for c in chapters)})
     lines = [x[1] for x in timeline_items(m)]
     out.append({"type": "text", "role": "rest", "text": "[the words, with their time spans]\n" + ("\n".join(lines) if lines else "(no words were recognised)")})
+    return out
+
+
+def link_blocks(m: Dict[str, Any], label: str, rerun: Optional["Rerun"] = None) -> List[Dict[str, Any]]:
+    """The words lane (0.7.2): a link the user gave — the site's captions (or a transcript of the sound), no
+    frames, the video not even downloaded. The rules: decide from the user's message what they want of it,
+    ask one question when the message does not say, and ask for the picture only where it is needed (the
+    first such request downloads the video). The same lane for a downloaded file asked with --frames words."""
+    p = m["probe"]
+    dur = float(p.get("duration") or 0)
+    link = m.get("link") or {}
+    info = read_info_json(Path(m["source"]))
+    chapters = info.get("chapters") or []
+    tm = m.get("transcript_meta") or {}
+    src = ("the site's own captions" + (" (written by people)" if tm.get("kind") == "manual" else " (automatic — they can mishear)" if tm.get("kind") == "automatic" else "")
+           if tm.get("source") == "captions" else "an automatic speech transcript — it can mishear words")
+    title = str(link.get("title") or info.get("title") or "").strip()
+    site = str(link.get("site") or "").strip()
+    url = str(link.get("webpage_url") or link.get("url") or "").strip()
+    downloaded = bool(link.get("downloaded")) or Path(m["source"]).is_file()
+    hint = (link.get("lecture") or {})
+    per = claude_image_tokens(*fit_dims(p["width"], p["height"], AT_WIDTH)) if p.get("width") and p.get("height") else 0
+    rules = [
+        "This is a LINK the user gave, not a file: only the WORDS came" + (f" ({src})" if src else "") + " — the video "
+        + ("is on this computer but no frames were cut" if downloaded else "itself was not downloaded") + " and no frame comes with this lane. Read the words first.",
+        "Decide from the user's message what they want of the link — an answer, a summary, a check of what is said, "
+        "a step from it, the words at a moment, something to do with what it teaches — and do that. When the message "
+        "does not say what to do with it, ask ONE short question and stop: do not summarise it unasked.",
+        "The picture, only where the task needs it SEEN (a slide, an interface, code, a demonstration, what is shown at a "
+        "moment the words point at): " + (rerun.at(["03:12", "07:40"]) if rerun else "run video2llm with --frames at --times 03:12,07:40")
+        + f" gives one frame per moment ({AT_WIDTH}px" + (f", ≈ {per:,} tokens each" if per else "") + f", up to {AT_MAX} a request); "
+        + (rerun.next(0.0) if rerun else "run video2llm with --start 0:00") + " gives the 1 fps overview from a moment"
+        + (", " + rerun.frames() + " / " + rerun.sounds() + " every frame / the sounds of a moment" if rerun else "")
+        + ". " + ("" if downloaded else "The first such request DOWNLOADS the video (up to 1080p — a minute or more for a long one): say so in a "
+                  "line and go on. ")
+        + "Up to 6 frames with `at` need no yes; the overview, every frame and the sounds — ask yes or no with the cost first.",
+        document_offer_rule(rerun),
+    ]
+    if hint.get("hint"):
+        rules.append("The site files it as something taught or explained (" + "; ".join(hint.get("reasons") or []) + ") — a sign for rule 4, not a decision.")
+    if rerun:
+        rules.append(f"Use only {rerun.these()} for this video; do not open the link in a browser, do not download or run anything else on it. {rerun.cannot()}")
+    head = (f"[{label}: link" + (f" — «{title}»" if title else "") + (f" ({site})" if site else "") + (f", {tcode(dur)}" if dur else "")
+            + (f", {p['width']}×{p['height']}" if p.get("width") and p.get("height") else "") + (f"\n{url}" if url else "")
+            + "\nWORDS ONLY.\nRules:\n" + "\n".join(f"{k + 1}. {r}" for k, r in enumerate(rules)) + "]")
+    out: List[Dict[str, Any]] = [{"type": "text", "text": head, "role": "head"}]
+    if chapters:
+        out.append({"type": "text", "role": "before", "text": "[chapters, from the site]\n" + "\n".join(
+            f"[{tcode(float(c.get('start_time') or 0))}] {str(c.get('title') or '').strip()}" for c in chapters)})
+    lines = [x[1] for x in timeline_items(m)]
+    out.append({"type": "text", "role": "rest", "text": "[the words, with their time spans]\n" + ("\n".join(lines) if lines else "(no words: the site has no captions and no speech was recognised)")})
     return out
 
 
@@ -3460,6 +3624,23 @@ def link_main(argv: List[str]) -> None:
 
 
 
+def rerun_cmd(a: argparse.Namespace, source: Path, out_dir: Path) -> str:
+    """The command the lane header gives for the next run: this script, the same file, the same settings that
+    shape the files (a follow-up run without them would cut into other folders)."""
+    return (("& " if os.name == "nt" else "")  # PowerShell runs a quoted path only with the call operator
+            + f"{shell_arg(sys.executable)} {shell_arg(Path(__file__).resolve())} {shell_arg(source)}"
+            + (f" --out {shell_arg(out_dir)}" if a.out else "")
+            # the settings that shape the files: a follow-up run without them would cut into other folders
+            + (f" --names {a.names}" if a.names != "en" else "") + (" --single-frames" if a.single_frames else "")
+            + (f" --sheet-frames {a.sheet_frames}" if a.sheet_frames else "")
+            + (f" --fps {a.fps}" if a.fps != FRAME_FPS else "") + (f" --max-frames {a.max_frames}" if a.max_frames else "")
+            + (f" --language {a.language}" if a.language != "auto" else "") + (f" --captions {a.captions}" if a.captions else "")
+            + (f" --whisper-model {shell_arg(a.whisper_model)}" if a.whisper_model != "small" else "")
+            + (f" --sound-threshold {a.sound_threshold:g}" if a.sound_threshold != 0.15 else "")
+            + (f" --ffmpeg {shell_arg(a.ffmpeg)}" if a.ffmpeg else "") + (f" --ffprobe {shell_arg(a.ffprobe)}" if a.ffprobe else "")
+            + (f" --sounds-model {shell_arg(a.sounds_model)}" if a.sounds_model else ""))
+
+
 def main(argv: Optional[List[str]] = None) -> None:
     args0 = sys.argv[1:] if argv is None else argv
     if args0 and args0[0] == "guide":   # `video2llm guide --spec …` — the document (the page, the PDF)
@@ -3481,10 +3662,14 @@ def main(argv: Optional[List[str]] = None) -> None:
     ap.add_argument("video", help="video file (mp4, mov, m4v, webm, mpeg, avi, 3gp …) or a URL (YouTube, Vimeo, a direct link — "
                                   "anything yt-dlp knows; downloaded once into <Videos>/video2llm/downloads, up to 1080p)")
     g = ap.add_argument_group("which frames")
-    g.add_argument("--frames", choices=["auto", "1", "all", "none", "at"], default="auto",
-                   help="auto (default) = the script decides by the material: a lecture, a tutorial, a review, a talk (the site's "
-                        "category, the title, the chapters, the length, the share of speech — the reasons are printed) gets the LECTURE "
+    g.add_argument("--frames", choices=["auto", "1", "all", "none", "at", "words"], default="auto",
+                   help="auto (default) = the script decides by the material: a URL gets the WORDS lane (the site's captions, the "
+                        "video not downloaded — see words); a file that is a lecture, a tutorial, a review, a talk (the file "
+                        "name, the chapters, the length, the share of speech — the reasons are printed) gets the LECTURE "
                         "lane, footage to watch gets the overview; "
+                        "words = the words only: no frames, the video of a URL is NOT downloaded (the site's captions, or the sound "
+                        "alone → Whisper); the lane tells the model to decide from the user's message what to do and to ask for "
+                        "the picture only where it is needed — the first such request downloads the video; "
                         "1 = one frame per second over the whole video, 768px — what happens, who says what; "
                         f"all = frame by frame, {DENSE_WIDTH}px — every frame from --start to --end, both included (flicker, "
                         f"glitches, fast motion); up to {DENSE_MAX_FRAMES} frames per request (4 s at 30 fps, 2 s at 60), "
@@ -3583,9 +3768,18 @@ def main(argv: Optional[List[str]] = None) -> None:
     tools = Tools(find_tool("ffmpeg", a.ffmpeg), find_tool("ffprobe", a.ffprobe))
     progress = make_progress(a.quiet)
     captions_prefer = [x.strip() for x in (a.captions or "").split(",") if x.strip()] or ([os_language()] if os_language() else [])
+    link_m: Optional[Dict[str, Any]] = None  # 0.7.2: the words lane of a link — there is no file to cut
+    out_dir: Optional[Path] = None
     if URL_RE.match(a.video.strip()):
         log(f"video2llm {VERSION} — {a.video.strip()}")
-        source = download_video(a.video.strip(), tools, progress, a.yt_dlp, a.language, captions_prefer).resolve()
+        if a.frames in ("auto", "words") and not a.download_only:
+            # 0.7.2: a link gets the words only — the video is downloaded when a frame is asked for
+            source, out_dir, link_m = fetch_words(a.video.strip(), tools, progress, a.yt_dlp, a.language, captions_prefer,
+                                                  Path(a.out).expanduser().resolve() if a.out else None, a.whisper_model,
+                                                  not a.no_transcript)
+            a.frames = "words"
+        else:
+            source = download_video(a.video.strip(), tools, progress, a.yt_dlp, a.language, captions_prefer).resolve()
         if a.download_only:
             if a.json:
                 info = read_info_json(source)
@@ -3604,17 +3798,55 @@ def main(argv: Optional[List[str]] = None) -> None:
         if a.download_only:
             sys.exit("--download-only needs a URL")
         source = Path(a.video).expanduser().resolve()
-    try:
-        with open(source, "rb"):
-            pass
-    except PermissionError:
-        sys.exit(f"no permission to read {source}"
-                 + (" — macOS asks once per folder: allow your terminal in System Settings → Privacy & Security → "
-                    "Files and Folders (or Full Disk Access)" if sys.platform == "darwin" else ""))
-    except OSError:
-        sys.exit(f"not a file: {source}")
-    if not source.is_file():
-        sys.exit(f"not a file: {source}")
+        if not source.is_file():
+            # 0.7.2: the name a link's video WOULD get (its words came first — fetch_words): the words lane again
+            # from the manifest, or, when frames are asked for, the download now and the usual run
+            lane_dir = Path(a.out).expanduser().resolve() if a.out else source.with_name(f"{source.stem}_frames")
+            lm: Dict[str, Any] = {}
+            try:
+                lm = json.loads((lane_dir / MANIFEST_NAME).read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                pass
+            url = str((lm.get("link") or {}).get("url") or "")
+            if url and lm.get("source_mtime") is None:
+                if a.frames in ("auto", "words"):
+                    link_m, out_dir, a.frames = lm, lane_dir, "words"
+                else:
+                    log(f"video2llm {VERSION} — {url}")
+                    log("  the video of this link is not on this computer yet — downloading it")
+                    source = download_video(url, tools, progress, a.yt_dlp, a.language, captions_prefer).resolve()
+                    if not a.out and source.with_name(f"{source.stem}_frames") != lane_dir:
+                        a.out = str(lane_dir)  # the words and the wav live here already
+    if link_m is None:
+        try:
+            with open(source, "rb"):
+                pass
+        except PermissionError:
+            sys.exit(f"no permission to read {source}"
+                     + (" — macOS asks once per folder: allow your terminal in System Settings → Privacy & Security → "
+                        "Files and Folders (or Full Disk Access)" if sys.platform == "darwin" else ""))
+        except OSError:
+            sys.exit(f"not a file: {source}")
+        if not source.is_file():
+            sys.exit(f"not a file: {source}")
+    else:
+        assert out_dir is not None
+        names = NAMES[a.names]
+        rerun = Rerun(rerun_cmd(a, source, out_dir), source, a.agent_tool)
+        md_blocks = link_blocks(link_m, a.label, rerun)
+        path = out_dir / ("lane ссылка.md" if names is NAMES["ru"] else "lane_link.md")
+        write_markdown(md_blocks, a.ask or a.prompt, path)
+        lk = link_m.get("link") or {}
+        log(f"  words lane: {len(link_m.get('transcript') or [])} line(s), no frames"
+            + ("" if lk.get("downloaded") else " — the video is not downloaded"))
+        log(f"  wrote {path}")
+        if a.json:
+            print(json.dumps({"file": str(source), "dir": str(out_dir), "lane": str(path), "url": lk.get("url"),
+                              "title": lk.get("title"), "site": lk.get("site"), "duration": (link_m.get("probe") or {}).get("duration"),
+                              "captions": (link_m.get("transcript_meta") or {}).get("kind"),
+                              "lines": len(link_m.get("transcript") or []), "downloaded": bool(lk.get("downloaded")),
+                              "lecture": lk.get("lecture")}, ensure_ascii=False), flush=True)
+        return
     try:
         start = parse_tcode(a.start)
         end = parse_tcode(a.end) if a.end else None
@@ -3680,7 +3912,7 @@ def main(argv: Optional[List[str]] = None) -> None:
         else:
             log("  auto: footage to watch → the overview (--frames none for the lecture lane)")
     dense = a.frames == "all"
-    if a.frames in ("none", "at"):
+    if a.frames in ("none", "at", "words"):
         blocks = []   # these lanes are built below, after the rerun command is known
     else:
         blocks = lane_blocks(m, a.label, start, a.max_frames, dense, end=end, fps_overview=a.fps)
@@ -3693,19 +3925,7 @@ def main(argv: Optional[List[str]] = None) -> None:
             f" from {fmt_t(start)}" if names is NAMES["ru"] else f"_from_{fmt_t(start)}")
     else:
         suffix = ""
-    cmd = (("& " if os.name == "nt" else "")  # PowerShell runs a quoted path only with the call operator
-           + f"{shell_arg(sys.executable)} {shell_arg(Path(__file__).resolve())} {shell_arg(source)}"
-           + (f" --out {shell_arg(out_dir)}" if a.out else "")
-           # the settings that shape the files: a follow-up run without them would cut into other folders
-           + (f" --names {a.names}" if a.names != "en" else "") + (" --single-frames" if a.single_frames else "")
-           + (f" --sheet-frames {a.sheet_frames}" if a.sheet_frames else "")
-           + (f" --fps {a.fps}" if a.fps != FRAME_FPS else "") + (f" --max-frames {a.max_frames}" if a.max_frames else "")
-           + (f" --language {a.language}" if a.language != "auto" else "") + (f" --captions {a.captions}" if a.captions else "")
-           + (f" --whisper-model {shell_arg(a.whisper_model)}" if a.whisper_model != "small" else "")
-           + (f" --sound-threshold {a.sound_threshold:g}" if a.sound_threshold != 0.15 else "")
-           + (f" --ffmpeg {shell_arg(a.ffmpeg)}" if a.ffmpeg else "") + (f" --ffprobe {shell_arg(a.ffprobe)}" if a.ffprobe else "")
-           + (f" --sounds-model {shell_arg(a.sounds_model)}" if a.sounds_model else ""))
-    rerun = Rerun(cmd, source, a.agent_tool, auto=auto_hint is not None)
+    rerun = Rerun(rerun_cmd(a, source, out_dir), source, a.agent_tool, auto=auto_hint is not None)
     if a.frames == "at":
         dur0 = m["probe"]["duration"]
         times = sorted({round(min(max(0.0, t), max(0.0, dur0 - 0.05)), 2) for t in at_times})  # time order, each moment once
@@ -3718,7 +3938,14 @@ def main(argv: Optional[List[str]] = None) -> None:
         log(f"  frames at {len(cut)} moment(s)" + (f" ≈ {claude_image_tokens(*wh) * len(cut):,} image tokens" if wh else ""))
         log(f"  wrote {path}")
         return
-    if a.frames == "none" and not (a.sounds and not a.format):  # a sound request on this lane falls through to the sound check
+    if a.frames in ("none", "words") and not (a.sounds and not a.format):  # a sound request on this lane falls through to the sound check
+        if a.frames == "words":  # 0.7.2: the words lane of a file that is here (a link downloaded, or any file)
+            md_blocks = link_blocks(m, a.label, rerun)
+            path = out_dir / ("lane ссылка.md" if names is NAMES["ru"] else "lane_link.md")
+            write_markdown(md_blocks, a.ask or a.prompt, path)
+            log(f"  words lane: {len(m.get('transcript') or [])} line(s), no frames")
+            log(f"  wrote {path}")
+            return
         md_blocks = lecture_blocks(m, a.label, rerun)
         if audio_only:
             path = out_dir / ("lane звук.md" if names is NAMES["ru"] else "lane_audio.md")
