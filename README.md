@@ -108,7 +108,8 @@ Compared with the projects closest to it, from their READMEs as of 2026-10-07:
 
 Ours and verified: the overview + frame-by-frame technique with anchors and the cost in the header; the
 lecture lane and the Notes built from it; sounds on request with a local model and no PyTorch; outputs
-chosen for how each chat really reads attachments; speech exactly as in Deep Artisan (Whisper with its
+chosen for how each chat really reads attachments — the sheets for every model, Gemini included, measured
+against its native video input; speech exactly as in Deep Artisan (Whisper with its
 voice filter, doubtful lines dropped — compared line by line on real footage); every model downloaded from
 this repository only. What others do and we do not: scene detection and de-duplication, an MCP server.
 
@@ -194,9 +195,17 @@ opening the video, read the lane it chose, open every image, ask with the cost b
 
 | Where you ask | What to make | How |
 |---|---|---|
-| **Claude** (claude.ai, desktop) · **Gemini** (app / web) | `--format pdf` | attach `lane.pdf`: every page is read as text **and** as an image (Claude up to 100 pages, Gemini 1000); Gemini also takes the video file itself up to 5 min (`--native --format gemini`) |
+| **Claude** (claude.ai, desktop) · **Gemini** (app / web) | `--format pdf` | attach `lane.pdf`: every page is read as text **and** as an image (Claude up to 100 pages, Gemini 1000). Gemini also takes the video file itself (`--native --format gemini`, up to 5 min a part) — but the sheets are the better way for Gemini too, see below |
 | **ChatGPT** · any chat with image upload | `--format sheets` | attach the files of one `message-NN` folder per message — the contact sheets plus `about this video.txt` with the header and the whole transcript (ChatGPT reads images inside PDFs only on Enterprise) |
 | **An API key** (Anthropic, OpenAI, Gemini) | `--format anthropic` / `openai` / `gemini` | a ready request body with the frames inlined; `--ask "…"` sends it with the key from `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` / `GEMINI_API_KEY` |
+
+**Why the sheets, even for a model that takes video.** Given the file itself, Gemini samples it at 1 frame a
+second on its own and counts 258 tokens for every frame, whatever the resolution; a sheet of six overview
+frames is two image tiles — 516 tokens against 1,548 for the same six seconds. And with the file the model
+has no tags to name a moment by, no way to ask for a denser or a frame-by-frame look at one place, and no
+costs to tell the user. That is why Deep Artisan feeds Gemini the lane exactly as it feeds every other model
+(since 09.10.2026); `--native` stays for the case where the model must hear the track or see the motion
+itself.
 
 Agents with a file tool (Claude Code, Claude Cowork, Codex CLI, Gemini CLI, Qwen Code, Cursor, Antigravity …)
 read `lane.md` and open the contact sheets as images. Verified on 07.10.2026 with five agents — Opus 5.5,
